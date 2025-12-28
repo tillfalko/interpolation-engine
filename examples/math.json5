@@ -1,0 +1,15 @@
+{
+    default_state: {
+        order_index : 1,
+        inserts: {
+        },
+    },
+    order: [
+        {cmd:'math', input:'max(1,2,3)', output_name:'result'},
+        {cmd:'print', text:'The result is {result}!\n'},
+    ],
+    tasks:{
+    },
+    save_states : {
+    },
+}

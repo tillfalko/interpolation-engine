@@ -2,6 +2,16 @@ Interpolation Engine is a CLI tool to execute programs defined by JSON5 files.
 
 **Why JSON5?** Valid programs are a subset of JSON5. JSON is unambiguous, easy to parse, fast to parse, and easy to write for experienced programmers. It is can express the nested structures that Interpolation Engine requires. I use JSON5 because I want comments, trailing commas, and optional quotes for keys.
 
+## Installation
+```
+pip install interpolation-engine
+```
+
+## Usage
+```
+interpolation_engine my_program.json5
+```
+
 ## Command Reference
 
 This is a list of all valid Interpolation Engine commands.
@@ -215,10 +225,12 @@ Example:<br>
 
 #### `math`
 Fields: `input`, `output_name`<br>
-Evaluates a math expression and stores the result.<br>
+Evaluates a math expression and stores the integer result.<br>
+Supports `+ - * / %` and parentheses; expressions are interpolated before evaluation.<br>
+Functions: `length(name)`, `min(list_or_csv)`, `max(list_or_csv)`, `round(expr)`, `sign(expr)`.<br>
 Example:<br>
 ```json5
-{cmd: "math", input: "3 + 4 * 2", output_name: "result"}
+{cmd: "math", input: "max(1,2,3) + length(items)", output_name: "result"}
 ```
 
 #### `chat`
