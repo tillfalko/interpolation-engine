@@ -1,0 +1,14 @@
+{
+    default_state: {
+        order_index : 1,
+        inserts: {
+        },
+    },
+    order: [
+        {cmd:'print', text:'Hello, world!'},
+    ],
+    tasks:{
+    },
+    save_states : {
+    },
+}
