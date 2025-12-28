@@ -326,7 +326,6 @@ class InputOutputManager:
             # Check if the bottom is visible (accounts for wrapped lines)
             at_bottom = (ri.vertical_scroll + ri.window_height >= ri.ui_content.line_count)
 
-        print(f'xxx {at_bottom=}', file=stderr)
         old_cursor = self.output_buffer.cursor_position
 
         #self.output_buffer.read_only = False
