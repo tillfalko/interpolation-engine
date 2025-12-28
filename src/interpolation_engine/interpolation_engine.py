@@ -159,6 +159,7 @@ from pydantic import BaseModel
 from signal import SIGINT
 from sys import stderr, stdout
 from typing import Literal
+import argparse
 import asyncio # for parallel generation
 import json5
 from openai import AsyncOpenAI
@@ -497,15 +498,10 @@ def get_interpdata(inserts, insertkey: str):
         case str() as a if a.startswith("ARG") and (num := a[3:]).isdigit():
             # Caputure e.g. ARG1
 
-            if not ( 0 < int(num) <= len(sys.argv) - 2):
-                raise InterpolationException(f"Argument interpolation key '{insertkey}' is used, but the user only passed {len(sys.argv) - 2} arguments.")
-
-            replaced_escaped_insert_start = '.〠'
-            replaced_escaped_insert_stop  = '〠.'
-
-            return (sys.argv[int(num)+1]
-                .replace(insert_start, escape+insert_start)
-                .replace(insert_stop, escape+insert_stop))
+            if insertkey not in inserts:
+                raise InterpolationException(
+                    f"Argument interpolation key '{insertkey}' is used, but the user passed less than {num} program arguments.")
+            return inserts[insertkey]
 
 
         case '': 
@@ -1175,14 +1171,10 @@ def validate_program(program):
         # ARG1, ARG2 etc require special handling for pretty error message.
         if insertkey.startswith("ARG") and (num := insertkey[3:]).isdigit():
             assert int(num) > 0, f"Order Index {order_index}: Argument interpolation keys must be greater than 0. '{insertkey}' is not valid."
-
-
-            # Commented out because programs may need to check whether ARG1 is defined using NULL.
-            #assert int(num) <= len(sys.argv) - 2, f"Order Index {order_index}: Argument interpolation key '{insertkey}' is used, but the user only passed {len(sys.argv) - 2} arguments."
-
+            # skip checking if the program uses ARG{n} that the user didn't pass.
+            # downside: catch less bugs during validation
+            # upside: all programs to change their behavior by testing with goto_map how many args were passed.
             is_possible_key = True # assertions passed
-
-  
 
         pretty_key = insertkey.replace(any_marker, '<Any>')
         errortext = (
@@ -2218,6 +2210,7 @@ def add_line_numbers(json_content: str) -> str:
 disk_program_cache = None
 disk_program_hash = None
 
+
 def load(filepath) -> (dict, dict):
     global disk_program_cache, disk_program_hash
 
@@ -2271,15 +2264,21 @@ def save(program, state, filepath):
     
 
 
-async def async_main():
-
-    assert len(sys.argv) >= 2, "Specify a single program (.json5 file) to run and optionally pass arguments that the program will handle."
-    filepath = sys.argv[1]
+async def async_main(filepath, args):
+    assert filepath, "Specify a single program (.json5 file) to run and optionally pass arguments that the program will handle."
     filename = filepath.split('/')[-1].split('.json5')[0]
     program, state = load(filepath)
+
+    # populate ARG1, ARG2, etc.
+    for i, arg in enumerate(args, start=1):
+        # always escape user passed args, if a program wants to interpolate user input
+        # it can use 'unescape'.
+        state['inserts'][f"ARG{i}"] = (arg
+            .replace(insert_start, escape+insert_start)
+            .replace(insert_stop, escape+insert_stop))
+
     completion_args = program.get('completion_args', {})
     named_tasks = program.get('tasks', {})
-
 
     if len(program['order']) > 0:
         await InputOutputManager().start()
@@ -2334,7 +2333,34 @@ async def async_main():
     return state
 
 def main(): # cli entry point
-    state = asyncio.run(async_main())
+
+    # errors and debug info should go to a log file if passed
+    # it may seem hacky to overwrite sys.stderr but if a user passed --log
+    # they probably also want exceptions to be logged.
+    def configure_stderr(log_path):
+        global stderr
+        if log_path:
+            log_handle = open(log_path, "a")
+            sys.stderr = log_handle
+            stderr = log_handle
+
+    parser = argparse.ArgumentParser(
+        description="Run an interpolation-engine program.",
+    )
+    parser.add_argument("program", nargs="?", help="Path to the .json5 program file.")
+    parser.add_argument(
+        "program_arguments",
+        nargs=argparse.REMAINDER,
+        help="Any extra positional arguments are passed to the program where they are accessible with '{ARG1}', '{ARG2}' and so on.",
+    )
+    parser.add_argument("--log", dest="log_path", help="Specify a path to store log info at (recommended).")
+    args = parser.parse_args()
+    configure_stderr(args.log_path)
+    if not args.program:
+        print("Error: specify a program (.json5 file) to run.")
+        return
+
+    state = asyncio.run(async_main(args.program, args.program_arguments))
 
 if __name__ == '__main__':
     main()
