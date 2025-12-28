@@ -152,7 +152,7 @@ replace_map:
 
 """
 from copy import deepcopy
-from filter import inverted_filter, filter
+from .filter import inverted_filter, filter
 from glob import glob
 from hashlib import md5
 from pydantic import BaseModel
@@ -2272,7 +2272,7 @@ def save(program, state, filepath):
     
 
 
-async def main():
+async def async_main():
 
     assert len(sys.argv) >= 2, "Specify a single program (.json5 file) to run and optionally pass arguments that the program will handle."
     filepath = sys.argv[1]
@@ -2334,6 +2334,8 @@ async def main():
 
     return state
 
+def main(): # cli entry point
+    state = asyncio.run(main())
 
 if __name__ == '__main__':
-    state = asyncio.run(main())
+    main()
