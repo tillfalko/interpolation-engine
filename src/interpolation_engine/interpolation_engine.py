@@ -158,7 +158,6 @@ from glob import glob
 from hashlib import md5
 from pydantic import BaseModel
 from signal import SIGINT
-from sys import stderr, stdout
 from typing import Literal
 import argparse
 import asyncio # for parallel generation
@@ -335,9 +334,6 @@ class InputOutputManager:
             to_print = ''
 
             while text != '':
-                #print(f"remaining text: <start>{text}<stop>",file=stderr)
-                
-
                 to_print += text[0]
                 free_space = ri.window_width if text[0] == '\n' else free_space - 1
                 text = text[1:]
@@ -420,7 +416,7 @@ class InputOutputManager:
         all_keys = ('1','2','3','4','5','6','7','8','9','9','a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z')
 
         if len(options) > len(all_keys):
-            print(f"SELECT_INDEX ERROR: Got {len(options)} keys. That is too much.", file=stderr)
+            raise Exception(f"SELECT_INDEX ERROR: Got {len(options)} keys. That is too much.")
 
         async with self._input_lock:
             # Build option text
@@ -676,7 +672,7 @@ async def chat(
     visual_output = ""
     print(
         f"🛈  Starting generation with these completion_args: {completion_args}",
-        file=stderr,
+        file=log_sink,
     )
 
     try:
@@ -797,7 +793,7 @@ async def generate(
     aborted = False
     print(
         f"🛈  Starting generation with these completion_args: {completion_args}",
-        file=stderr,
+        file=log_sink,
     )
 
     try:
@@ -899,7 +895,7 @@ math_functions = {
 }
     
 def eval_math(inserts, math_input : str) -> int:
-    print(f"    Math:    {math_input}", file=stderr)
+    print(f"    Math:    {math_input}", file=log_sink)
     math_input = interpolate_inserts(inserts, math_input)
 
     width = len(math_input)
@@ -910,7 +906,7 @@ def eval_math(inserts, math_input : str) -> int:
     word_splitting_chars = set(" ()+-*/^%")
 
     while math_input.find('(') != -1:
-        print(f"    Math: => {math_input.ljust(width)}", file=stderr, end='')
+        print(f"    Math: => {math_input.ljust(width)}", file=log_sink, end='')
         outer_from = math_input.rfind('(')
         inner_to   = math_input.find(')', outer_from+len('('))
         if outer_from == -1 or inner_to == -1: break
@@ -920,29 +916,29 @@ def eval_math(inserts, math_input : str) -> int:
         if math_input[outer_from-1] in word_splitting_chars:
             # In this case, the parentheses do not belong to a function and can be evaluated.
             subresult = math_safe_eval(inner)
-            print(f"  //  ({inner}) = {subresult}", file=stderr)
+            print(f"  //  ({inner}) = {subresult}", file=log_sink)
         else:
             # Interpret last word as function name.
             function_name = ''.join([c if c not in word_splitting_chars else ' ' for c in math_input[:outer_from]]).split()[-1]
             outer_from -= len(function_name)
             if function_name in math_functions:
                 subresult = math_functions[function_name](inserts, inner)
-                print(f"  //  {function_name}({inner}) = {subresult}", file=stderr)
+                print(f"  //  {function_name}({inner}) = {subresult}", file=log_sink)
             else:
                 assert False, f"In expression '{math_input}', unprocessable function name '{function_name}' was encountered."
 
         math_input = math_input[:outer_from] + str(subresult) + math_input[outer_to:]
 
-    print(f"    Math: => {math_input}", file=stderr)
+    print(f"    Math: => {math_input}", file=log_sink)
 
     illegal_chars = set(math_input) - math_legal_terminals
     assert not illegal_chars, (
         f"Mathematical expression '{math_input}' contains illegal characters: {', '.join(repr(c) for c in sorted(illegal_chars))}. "
         "Perhaps you meant to interpolate an insert.")
     result = eval(math_input)
-    print(f"    Math: => {result}", file=stderr)
+    print(f"    Math: => {result}", file=log_sink)
     result_int = round(result)
-    print(f"    Math: => {result_int}", file=stderr)
+    print(f"    Math: => {result_int}", file=log_sink)
     if result != 0:
         assert abs((result_int - result)/result) < 0.0001, f"Got reult {result}, but currently results are restricted to be integers."
 
@@ -963,7 +959,7 @@ def splice_key_into_json5(content: str, key: str, new_value: dict, n_indent = 4)
     # This is more robust than a simple string search.
     match = re.search(f"(['\"]?{key}['\"]?)\\s*:\\s*{{", content)
     if not match:
-        print(f"Key '{key}' not found or it's not an object.", file=stderr)
+        print(f"Key '{key}' not found or it's not an object.", file=log_sink)
         return
 
     # 2. Find the matching closing brace.
@@ -1005,12 +1001,12 @@ def splice_key_into_json5(content: str, key: str, new_value: dict, n_indent = 4)
 
 
 def log_messages(messages):
-    print("\n----------------------------MESSAGES--------------------------", file=stderr)
-    print('\n\n'.join([f"{m['role'].upper()}\n{m['content']}" for m in messages]), file=stderr)
-    print("\n--------------------------------------------------------------", file=stderr)
+    print("\n----------------------------MESSAGES--------------------------", file=log_sink)
+    print('\n\n'.join([f"{m['role'].upper()}\n{m['content']}" for m in messages]), file=log_sink)
+    print("\n--------------------------------------------------------------", file=log_sink)
 def log_string(s, title=''):
-    print(f"\n----------------------------{title}----------------------------", file=stderr)
-    print(s, file=stderr)
+    print(f"\n----------------------------{title}----------------------------", file=log_sink)
+    print(s, file=log_sink)
 
 
 
@@ -1130,9 +1126,6 @@ def validate_program(program):
     escaped_insert_stop  = escape+insert_stop
     replaced_escaped_insert_start = '.〠'
     replaced_escaped_insert_stop  = '〠.'
-    #content = '\\\\{hey\\\\}  ' + content # DELETEME, debug 
-    #print('\n\n\nBEFORE', file=stderr)
-    #print(content, file=stderr)
 
     content = (content
         .replace(escaped_insert_start, replaced_escaped_insert_start)
@@ -1145,9 +1138,6 @@ def validate_program(program):
             assert field.count(insert_start) == field.count(insert_stop), (
                 f"Order Index {order_index}: The following content has an uneven number of '{insert_start}' and '{insert_stop}':\n\n\"\"\"{field}\"\"\""
             )
-    #print('\n\n\nAFTER', file=stderr)
-    #print(content, file=stderr)
-    #quit()
 
     while content.find(insert_start) != -1:
         # Parse keys from the inside out.
@@ -1235,206 +1225,198 @@ def validate_program(program):
             t = type(task[field_name])
             assert t in legal_types, f"{task['traceback_label']}: field '{field_name}' has value '{t}', but must be one of {legal_types}."
             
-        try:
-            match task:
+        match task:
 
-                case {'cmd':'join_list', 'list': _, 'before': _, 'between': _, 'after': _, 'output_name': _}:
-                    assert_types('list', [list])
-                    assert_types('before', [str])
-                    assert_types('between', [str])
-                    assert_types('after', [str])
-                    assert_types('output_name', [str])
+            case {'cmd':'join_list', 'list': _, 'before': _, 'between': _, 'after': _, 'output_name': _}:
+                assert_types('list', [list])
+                assert_types('before', [str])
+                assert_types('between', [str])
+                assert_types('after', [str])
+                assert_types('output_name', [str])
 
-                case {'cmd':'list_concat', 'lists':_, 'output_name': _}:
-                    assert_types('lists', [list])
-                    assert_types('output_name', [str])
+            case {'cmd':'list_concat', 'lists':_, 'output_name': _}:
+                assert_types('lists', [list])
+                assert_types('output_name', [str])
 
-                case {'cmd':'list_append', 'list':_, 'item':_, 'output_name': _}:
-                    assert_types('list', [list])
-                    assert_types('output_name', [str])
+            case {'cmd':'list_append', 'list':_, 'item':_, 'output_name': _}:
+                assert_types('list', [list])
+                assert_types('output_name', [str])
 
-                case {'cmd':'list_remove', 'list':_, 'item':_, 'output_name': _}:
-                    assert_types('list', [list])
-                    assert_types('output_name', [str])
+            case {'cmd':'list_remove', 'list':_, 'item':_, 'output_name': _}:
+                assert_types('list', [list])
+                assert_types('output_name', [str])
 
-                case {'cmd':'list_index', 'list':_, 'index':_, 'output_name': _}:
-                    assert_types('list', [list])
-                    assert_types('index', [int, str]) # str for math  input
-                    assert_types('output_name', [str])
+            case {'cmd':'list_index', 'list':_, 'index':_, 'output_name': _}:
+                assert_types('list', [list])
+                assert_types('index', [int, str]) # str for math  input
+                assert_types('output_name', [str])
 
-                case {'cmd':'list_slice', 'list':_, 'from_index':_, 'to_index':_, 'output_name': _}:
-                    assert_types('list', [list])
-                    assert_types('from_index', [int, str]) # str for math  input
-                    assert_types('to_index', [int, str]) # str for math  input
-                    assert_types('output_name', [str])
+            case {'cmd':'list_slice', 'list':_, 'from_index':_, 'to_index':_, 'output_name': _}:
+                assert_types('list', [list])
+                assert_types('from_index', [int, str]) # str for math  input
+                assert_types('to_index', [int, str]) # str for math  input
+                assert_types('output_name', [str])
 
-                case {'cmd':'user_choice', 'list': _, 'output_name': _, 'description':_}:
-                    assert_types('list', [list])
-                    assert_types('description', [str])
-                    assert_types('output_name', [str])
+            case {'cmd':'user_choice', 'list': _, 'output_name': _, 'description':_}:
+                assert_types('list', [list])
+                assert_types('description', [str])
+                assert_types('output_name', [str])
 
-                case {'cmd':'user_input', 'prompt':_, 'output_name': _}:
-                    assert_types('prompt', [str])
-                    assert_types('output_name', [str])
+            case {'cmd':'user_input', 'prompt':_, 'output_name': _}:
+                assert_types('prompt', [str])
+                assert_types('output_name', [str])
 
-                case {'cmd':'run_task', 'task_name':task_name, **extra_args}:
-                    assert_types('task_name', [str])
-                    assert task_name in program['tasks'], f"{task['traceback_label']}: Task '{task_name}' is used at but never defined."
+            case {'cmd':'run_task', 'task_name':task_name, **extra_args}:
+                assert_types('task_name', [str])
+                assert task_name in program['tasks'], f"{task['traceback_label']}: Task '{task_name}' is used at but never defined."
 
-                case {'cmd':'parallel_race', 'tasks':_}:
-                    assert_types('tasks', [list])
+            case {'cmd':'parallel_race', 'tasks':_}:
+                assert_types('tasks', [list])
 
-                case {'cmd':'parallel_wait', 'tasks':_}:
-                    assert_types('tasks', [list])
+            case {'cmd':'parallel_wait', 'tasks':_}:
+                assert_types('tasks', [list])
 
-                case {'cmd':'serial', 'tasks':_}:
-                    assert_types('tasks', [list])
+            case {'cmd':'serial', 'tasks':_}:
+                assert_types('tasks', [list])
 
-                case {'cmd':'label', 'name':_}:
-                    assert_types('name', [str])
+            case {'cmd':'label', 'name':_}:
+                assert_types('name', [str])
 
-                case {'cmd':'set', 'item': _, 'output_name': _}:
-                    assert_types('output_name', [str])
+            case {'cmd':'set', 'item': _, 'output_name': _}:
+                assert_types('output_name', [str])
 
-                case {'cmd':'unescape', 'item': _, 'output_name':_}:
-                    assert_types('output_name', [str])
+            case {'cmd':'unescape', 'item': _, 'output_name':_}:
+                assert_types('output_name', [str])
 
-                case {'cmd':'escape', 'item': _, 'output_name':_}:
-                    assert False, f"{task['traceback_label']}: I want to depcreciate 'escape' since a runtime task should not see strings with unescaped interpolation markers. Why do you need it here?"
-                    assert_types('output_name', [str])
+            case {'cmd':'print', 'text':_}:
+                assert_types('text', [str])
 
-                case {'cmd':'print', 'text':_}:
-                    assert_types('text', [str])
+            case {'cmd':'sleep', 'seconds':_}:
+                assert_types('seconds', [float, int])
 
-                case {'cmd':'sleep', 'seconds':_}:
-                    assert_types('seconds', [float, int])
+            case {'cmd':'clear'}:
+                pass
 
-                case {'cmd':'clear'}:
-                    pass
+            case {'cmd':'goto', 'name':target}:
+                assert_types('name', [str])
+                assert target in labels_seen, f"{task['traceback_label']}: Goto is pointing at '{target}', which is not defined.\n\nAvailable labels: {labels_seen}"
+                assert not task['traceback_label'].rsplit('/',maxsplit=1)[-1].startswith('parallel'), f"{task['traceback_label']}: goto is not supported in parallel."
 
-                case {'cmd':'goto', 'name':target}:
-                    assert_types('name', [str])
-                    assert target in labels_seen, f"{task['traceback_label']}: Goto is pointing at '{target}', which is not defined.\n\nAvailable labels: {labels_seen}"
-                    assert not task['traceback_label'].rsplit('/',maxsplit=1)[-1].startswith('parallel'), f"{task['traceback_label']}: goto is not supported in parallel."
+            case {'cmd':'goto_map', 'text': value_text, 'target_maps':target_maps}:
+                assert_types('text', [str])
+                assert_types('target_maps', [list])
 
-                case {'cmd':'goto_map', 'text': value_text, 'target_maps':target_maps}:
-                    assert_types('text', [str])
-                    assert_types('target_maps', [list])
+                for x in target_maps:
+                    assert type(x) == dict and len(x) == 1, f"{task['traceback_label']}: Elements of target_maps have to be dicts with one key-value-pair. The item {x} does not match."
 
-                    for x in target_maps:
-                        assert type(x) == dict and len(x) == 1, f"{task['traceback_label']}: Elements of target_maps have to be dicts with one key-value-pair. The item {x} does not match."
+                target_keys = [next(iter(d.keys())) for d in target_maps]
+                target_values = [next(iter(d.values())) for d in target_maps]
 
-                    target_keys = [next(iter(d.keys())) for d in target_maps]
-                    target_values = [next(iter(d.values())) for d in target_maps]
-
-                    no_interpolation_used = 0 == sum(insert_start in x for x in [value_text]+target_keys)
-                    no_wildcard = 0 == sum('*' in k for k in target_keys)
-                    if no_interpolation_used and no_wildcard:
-                        assert value_text in target_keys, f"{task['traceback_label']}: value_text ({value_text}) is neither interpolated nor in target keys, and because there is no wildcard, this goto_map will fail."
-                        
-
-                    for target in target_values:
-                        if insert_start not in target and target not in labels_seen:
-                            raise Exception(f"{task['traceback_label']}: goto_map is pointing at '{target}', which is not defined.")
-                    assert not task['traceback_label'].rsplit('/',maxsplit=1)[-1].startswith('parallel'), f"{task['traceback_label']}: goto_map is not supported in parallel."
-
-                case {'cmd':'replace_map', 'item': _, 'output_name':_, 'wildcard_maps':_, **extra_args}:
-                    assert_types('wildcard_maps', [list])
-                    assert_types('output_name', [str])
-
-                case {'cmd':'for', 'name_list_map':_, 'tasks':_}:
-                    assert_types('name_list_map', [dict])
-                    assert_types('tasks', [list])
-
-                case {'cmd':'show_inserts'}:
-                    pass
-
-                case {'cmd':'random_choice', 'output_name':output_name, 'list': _}:
-                    assert_types('list', [list])
-                    assert_types('output_name', [str])
-
-                case {'cmd':'delete', 'wildcards': wildcards}:
-                    assert_types('wildcards', [list])
-                    if type(wildcards) == list:
-                        for wildcard in wildcards:
-                            if get_simple_insertkey(wildcard):
-                                # wilcards is interpolated at runtime, can't be checked here
-                                continue
-                            never_defined = True
-                            for k in all_insertkeys_ever_available:
-                                if is_wildcard_match(wildcard, k):
-                                    never_defined = False
-                                    break
-                            assert not never_defined, f"{task['traceback_label']}: you want to delete '{wildcard}', but this will never be defined."
-
-                case {'cmd':'delete_except', 'wildcards': name_list}:
-                    assert_types('wildcards', [list])
-                    if type(name_list) == list:
-                        for wildcard in name_list:
-                            #if get_simple_insertkey(wildcard):
-                            #    # wilcards is interpolated at runtime, can't be checked here
-                            #    continue
-                            never_defined = True
-                            for k in all_insertkeys_ever_available:
-                                if is_wildcard_match(wildcard, k):
-                                    never_defined = False
-                                    break
-                            assert not never_defined, f"{task['traceback_label']}: you want to delete '{wildcard}', but this will never be defined."
-
-                case {'cmd':'math', 'input': math_input, 'output_name':_}:
-                    assert_types('input', [str])
-                    assert_types('output_name', [str])
-                    assert math_input.count('(') == math_input.count(')'), f"{task['traceback_label']}: Illegal parentheses in \"{math_input}\"."
-
-                case {'cmd':'chat', **args}:
+                no_interpolation_used = 0 == sum(insert_start in x for x in [value_text]+target_keys)
+                no_wildcard = 0 == sum('*' in k for k in target_keys)
+                if no_interpolation_used and no_wildcard:
+                    assert value_text in target_keys, f"{task['traceback_label']}: value_text ({value_text}) is neither interpolated nor in target keys, and because there is no wildcard, this goto_map will fail."
                     
-                    arg_set = set(args) # Set only considers the keys of a dict.
-                    required_args = {'messages', 'output_name'}
 
-                    permitted_args = {
-                        'messages', 'output_name', 'n_outputs', 'start_str', 'stop_str', 'hide_start_str', 'hide_stop_str', 'shown', 'choices_list_name', 'choices_list', 'traceback_label', 'line', 'model',
-                        # the rest are opanai api options https://platform.openai.com/docs/api-reference/chat/create
-                        'extra_body', 'max_completion_tokens', 'temperature', 'seed', 'stop' 
-                    }
-                    if 'completion_args' not in program:
-                        required_args |= {'model'}
+                for target in target_values:
+                    if insert_start not in target and target not in labels_seen:
+                        raise Exception(f"{task['traceback_label']}: goto_map is pointing at '{target}', which is not defined.")
+                assert not task['traceback_label'].rsplit('/',maxsplit=1)[-1].startswith('parallel'), f"{task['traceback_label']}: goto_map is not supported in parallel."
 
-                    assert ('start_str' in arg_set) == ('stop_str' in arg_set), f"{task['traceback_label']}: You can either set both start_str and stop_str or none. Right now you have only set one of them."
-                    assert arg_set <= permitted_args, f"{task['traceback_label']}: chat has illegal arguments {arg_set - permitted_args}."
-                    assert arg_set >= required_args, f"{task['traceback_label']}: chat is missing required arguments {required_args - arg_set}."
-                    assert type(args['messages']) in (str, list)
+            case {'cmd':'replace_map', 'item': _, 'output_name':_, 'wildcard_maps':_, **extra_args}:
+                assert_types('wildcard_maps', [list])
+                assert_types('output_name', [str])
 
-                    if type(args['messages']) == list:
-                        for i,message in enumerate(args['messages']):
-                            if not get_simple_insertkey(message):
-                                assert type(message) == dict
-                                assert 'role' in message, f"{task['traceback_label']}: 'Message number {i+1} does not have 'role'."
-                                assert 'content' in message, f"{task['traceback_label']}: 'Message number {i+1} does not have 'role'."
-                                assert message['role'] in ('user', 'system', 'assistant'), f"{task['traceback_label']}: 'Message number {i+1} has unknown role '{message['role']}'."
+            case {'cmd':'for', 'name_list_map':_, 'tasks':_}:
+                assert_types('name_list_map', [dict])
+                assert_types('tasks', [list])
 
-                case {'cmd':'generate', **args}:
-                    
-                    arg_set = set(args) # Set only considers the keys of a dict.
-                    required_args = {'prompt', 'output_name'}
+            case {'cmd':'show_inserts'}:
+                pass
 
-                    permitted_args = {
-                        'prompt', 'output_name', 'n_outputs', 'start_str', 'stop_str', 'hide_start_str', 'hide_stop_str', 'shown', 'traceback_label', 'line', 'model',
-                        # The rest are ollama options (https://github.com/ollama/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values)
-                        'num_ctx', 'repeat_last_n', 'repeat_penalty', 'temperature', 'seed', 'stop', 'num_predict','top_k', 'top_p', 'min_p'
-                    }
-                    if 'completion_args' not in program:
-                        required_args |= {'model'}
+            case {'cmd':'random_choice', 'output_name':output_name, 'list': _}:
+                assert_types('list', [list])
+                assert_types('output_name', [str])
 
-                    assert ('start_str' in arg_set) == ('stop_str' in arg_set), f"{task['traceback_label']}: You can either set both start_str and stop_str or none. Right now you have only set one of them."
-                    assert arg_set <= permitted_args, f"{task['traceback_label']}: generate has illegal arguments {arg_set - permitted_args}."
-                    assert arg_set >= required_args, f"{task['traceback_label']}: generate is missing required arguments {required_args - arg_set}."
+            case {'cmd':'delete', 'wildcards': wildcards}:
+                assert_types('wildcards', [list])
+                if type(wildcards) == list:
+                    for wildcard in wildcards:
+                        if get_simple_insertkey(wildcard):
+                            # wilcards is interpolated at runtime, can't be checked here
+                            continue
+                        never_defined = True
+                        for k in all_insertkeys_ever_available:
+                            if is_wildcard_match(wildcard, k):
+                                never_defined = False
+                                break
+                        assert not never_defined, f"{task['traceback_label']}: you want to delete '{wildcard}', but this will never be defined."
 
-                case somethingelse:
-                    raise Exception(f"{task['traceback_label']}: Found unexpected task: {somethingelse}.")
+            case {'cmd':'delete_except', 'wildcards': name_list}:
+                assert_types('wildcards', [list])
+                if type(name_list) == list:
+                    for wildcard in name_list:
+                        #if get_simple_insertkey(wildcard):
+                        #    # wilcards is interpolated at runtime, can't be checked here
+                        #    continue
+                        never_defined = True
+                        for k in all_insertkeys_ever_available:
+                            if is_wildcard_match(wildcard, k):
+                                never_defined = False
+                                break
+                        assert not never_defined, f"{task['traceback_label']}: you want to delete '{wildcard}', but this will never be defined."
 
-        except Exception as e:
-            print(f"Error at {task['traceback_label']}", file=stderr)
-            raise e
+            case {'cmd':'math', 'input': math_input, 'output_name':_}:
+                assert_types('input', [str])
+                assert_types('output_name', [str])
+                assert math_input.count('(') == math_input.count(')'), f"{task['traceback_label']}: Illegal parentheses in \"{math_input}\"."
+
+            case {'cmd':'chat', **args}:
+                
+                arg_set = set(args) # Set only considers the keys of a dict.
+                required_args = {'messages', 'output_name'}
+
+                permitted_args = {
+                    'messages', 'output_name', 'n_outputs', 'start_str', 'stop_str', 'hide_start_str', 'hide_stop_str', 'shown', 'choices_list_name', 'choices_list', 'traceback_label', 'line', 'model',
+                    # the rest are opanai api options https://platform.openai.com/docs/api-reference/chat/create
+                    'extra_body', 'max_completion_tokens', 'temperature', 'seed', 'stop' 
+                }
+                if 'completion_args' not in program:
+                    required_args |= {'model'}
+
+                assert ('start_str' in arg_set) == ('stop_str' in arg_set), f"{task['traceback_label']}: You can either set both start_str and stop_str or none. Right now you have only set one of them."
+                assert arg_set <= permitted_args, f"{task['traceback_label']}: chat has illegal arguments {arg_set - permitted_args}."
+                assert arg_set >= required_args, f"{task['traceback_label']}: chat is missing required arguments {required_args - arg_set}."
+                assert type(args['messages']) in (str, list)
+
+                if type(args['messages']) == list:
+                    for i,message in enumerate(args['messages']):
+                        if not get_simple_insertkey(message):
+                            assert type(message) == dict
+                            assert 'role' in message, f"{task['traceback_label']}: 'Message number {i+1} does not have 'role'."
+                            assert 'content' in message, f"{task['traceback_label']}: 'Message number {i+1} does not have 'role'."
+                            assert message['role'] in ('user', 'system', 'assistant'), f"{task['traceback_label']}: 'Message number {i+1} has unknown role '{message['role']}'."
+
+            case {'cmd':'generate', **args}:
+                
+                arg_set = set(args) # Set only considers the keys of a dict.
+                required_args = {'prompt', 'output_name'}
+
+                permitted_args = {
+                    'prompt', 'output_name', 'n_outputs', 'start_str', 'stop_str', 'hide_start_str', 'hide_stop_str', 'shown', 'traceback_label', 'line', 'model',
+                    # The rest are ollama options (https://github.com/ollama/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values)
+                    'num_ctx', 'repeat_last_n', 'repeat_penalty', 'temperature', 'seed', 'stop', 'num_predict','top_k', 'top_p', 'min_p'
+                }
+                if 'completion_args' not in program:
+                    required_args |= {'model'}
+
+                assert ('start_str' in arg_set) == ('stop_str' in arg_set), f"{task['traceback_label']}: You can either set both start_str and stop_str or none. Right now you have only set one of them."
+                assert arg_set <= permitted_args, f"{task['traceback_label']}: generate has illegal arguments {arg_set - permitted_args}."
+                assert arg_set >= required_args, f"{task['traceback_label']}: generate is missing required arguments {required_args - arg_set}."
+
+            case somethingelse:
+                raise Exception(f"{task['traceback_label']}: Found unexpected task: {somethingelse}.")
+
 
     for task in tasks_to_check:
         validate_task(task)
@@ -1443,7 +1425,6 @@ def task_preview(task):
     return ", ".join([f"{k}={str_preview(v)}" for k,v in task.items() if k not in ('traceback_label',)])
 
 def recursive_interpolate(inserts, x):
-    #print('->', x, file=stderr)
     if get_simple_insertkey(x):
         return recursive_interpolate(inserts, interpolate_inserts(inserts, x))
     elif type(x) == str:
@@ -1475,13 +1456,12 @@ def recursive_interpolate(inserts, x):
         else:
             return {recursive_interpolate(inserts, xk):recursive_interpolate(inserts, xv) for xk,xv in x.items()}
     else:
-        #print('LEAVING', file=stderr)
         return x
 
 
 async def execute_task(state, task, completion_args, named_tasks, runtime_label : str):
     inserts = state['inserts']
-    print(f"🛈  Order Item {task['traceback_label']}:  {task_preview(task)}", file=stderr, flush=True)
+    print(f"🛈  Order Item {task['traceback_label']}:  {task_preview(task)}", file=log_sink, flush=True)
 
     task = recursive_interpolate(inserts, task)
 
@@ -1539,7 +1519,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
         case {'cmd':'user_choice', 'list': _list, 'output_name': output_name, 'description':description}:
 
             choice = _list[await InputOutputManager().select_index(_list, description = description)]
-            print(f"🛈  User selected {str_preview(choice)}.", file=stderr)
+            print(f"🛈  User selected {str_preview(choice)}.", file=log_sink)
             set_interpdata(inserts, output_name, choice)
 
         case {'cmd':'user_input', 'prompt':inputtext, 'output_name': output_name}:
@@ -1548,7 +1528,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             userinput = (userinput
                 .replace(insert_start, escape+insert_start)
                 .replace(insert_stop, escape+insert_stop))
-            print(f"🛈  User entered {str_preview(userinput)}.", file=stderr)
+            print(f"🛈  User entered {str_preview(userinput)}.", file=log_sink)
             set_interpdata(inserts, output_name, userinput)
 
         case {'cmd':'run_task', 'task_name':task_name, **extra_args}:
@@ -1635,28 +1615,6 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
         case {'cmd':'set', 'item': item, 'output_name': output_name}:
             set_interpdata(inserts, output_name, item)
 
-        case {'cmd':'escape', 'item': item, 'output_name': output_name}:
-
-            pass
-            # DEPRECIATED. Reason: a program task should not even 'see' strings like 'you {name}' because
-            # it will be eagerly interpolated. To have a program work with strings containing '{', '}',
-            # it must have been entered the runtime escaped to begin with. 
-
-            #def recursive_escape(x):
-            #    #print(f'got {str_preview(x)} of type {type(x)}', file=stderr)
-            #    if type(x) == str:
-            #        return x.replace(insert_start, escape+insert_start).replace(insert_stop, escape+insert_stop)
-            #    elif type(x) == list:
-            #        return [recursive_escape(xx) for xx in x]
-            #    elif type(x) == dict:
-            #        return {recursive_escape(xk):recursive_escape(xv) for xk,xv in x.items()}
-            #    else:
-            #        return x
-
-            #item = recursive_escape(item)
-
-            #set_interpdata(inserts, output_name, item)
-
         case {'cmd':'unescape', 'item': item, 'output_name': output_name}:
 
             # works just like 'set' but also unescapes strings.
@@ -1709,12 +1667,12 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             if interp_error:
                 assert 'NULL' in target_keys, f"Order Index {task['traceback_label']}: value text '{value_text}' could not be resolved but 'NULL' is not a key in target_maps."
                 target = target_values[ target_keys.index('NULL') ]
-                print(f"🛈  goto_map value could not be resolved ('NULL'), proceeding to {target}", file=stderr)
+                print(f"🛈  goto_map value could not be resolved ('NULL'), proceeding to {target}", file=log_sink)
             else:
                 matching_targets = [target for key,target in zip(target_keys, target_values) if is_wildcard_match(key, value_text)]
                 assert len(matching_targets) > 0, f"Order Index {task['traceback_label']}: goto_map has no matches for '{value_text}'."
                 target = matching_targets[0] # select first match. This is why we use a list of dicts for order.
-                print(f"🛈  goto_map value is {value_text=}, proceeding to {target}", file=stderr)
+                print(f"🛈  goto_map value is {value_text=}, proceeding to {target}", file=log_sink)
 
             if target != 'CONTINUE':
                 return {'goto_target': target}
@@ -1726,10 +1684,10 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
 
             def replace_str(text):
                 last = current = text
-                print(f"replace_map:\n    {str_preview(current)} \\\\ Interpolate", file=stderr)
+                print(f"replace_map:\n    {str_preview(current)} \\\\ Interpolate", file=log_sink)
                 while True:
                     current = str(interpolate_inserts(inserts, current)) # this may raise InterpolationException, will be caught
-                    print(f"    => {str_preview(current)} \\\\ Find match", file=stderr)
+                    print(f"    => {str_preview(current)} \\\\ Find match", file=log_sink)
 
                     for d in wildcard_maps:
                         k = next(iter(d.keys()))
@@ -1739,11 +1697,11 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                         if is_wildcard_match(k, current):
                             matches = get_wildcard_matches(k, current)
                             extra_inserts = {str(i+1):capture for i,capture in enumerate(matches)}
-                            print(f"        Key: {str_preview(k)}\n        Matches: {str_preview(matches)}", file=stderr)
+                            print(f"        Key: {str_preview(k)}\n        Matches: {str_preview(matches)}", file=log_sink)
                             current = str(interpolate_inserts(inserts | extra_inserts, v))
                             break
 
-                    print(f"    => {str_preview(current)}", file=stderr)
+                    print(f"    => {str_preview(current)}", file=log_sink)
 
                     if last == current or not repeat_until_done:
                         return current
@@ -1775,7 +1733,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                 if value_if_error is no_value:
                     assert False, f"{task['traceback_label']}: replace_map encountered an interpolation error without 'NULL' key: {repr(e)}"
                 else:
-                    print(f"        InterpolationError                     Matches: {str_preview(value_if_error)}", file=stderr)
+                    print(f"        InterpolationError                     Matches: {str_preview(value_if_error)}", file=log_sink)
                     set_interpdata(inserts, output_name, value_if_error )
                     return
 
@@ -1813,9 +1771,9 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             state[counter_label]   = state.get(counter_label, 1)
 
             while state[counter_label] <= lists_length: # order_index is 1-based.
-                print(f"🛈  For loop starting iteration {state[counter_label]}", file=stderr)
+                print(f"🛈  For loop starting iteration {state[counter_label]}", file=log_sink)
                 for item_name, _list in zip(item_names, lists):
-                    print(f"🛈  For loop: {item_name} set to {_list[state[counter_label] -1]}", file=stderr)
+                    print(f"🛈  For loop: {item_name} set to {_list[state[counter_label] -1]}", file=log_sink)
                     set_interpdata(inserts, item_name, _list[state[counter_label] - 1])
 
                 sub_index_label = f"order_index/{runtime_label}"
@@ -1846,7 +1804,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
 
         case {'cmd':'random_choice', 'output_name':output_name, 'list': _list}:
             random_choice = random.choice(_list)
-            print(f"🛈  Random choice resulted in '{str_preview(random_choice)}'.", file=stderr)
+            print(f"🛈  Random choice resulted in '{str_preview(random_choice)}'.", file=log_sink)
             set_interpdata(inserts, output_name, random_choice)
 
         case {'cmd':'delete', 'wildcards': wildcards}:
@@ -1860,7 +1818,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                         break
 
                 if should_delete:
-                    print(f"🛈  delete: '{k}'", file=stderr)
+                    print(f"🛈  delete: '{k}'", file=log_sink)
                     delete_interpdata(inserts, k)
 
         case {'cmd':'delete_except', 'wildcards': wildcards}:
@@ -1873,7 +1831,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                         break
 
                 if should_delete:
-                    print(f"🛈  delete: '{k}'", file=stderr)
+                    print(f"🛈  delete: '{k}'", file=log_sink)
                     delete_interpdata(inserts, k)
 
         case {'cmd':'math', 'input': math_input, 'output_name':output_name}:
@@ -1938,7 +1896,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                 break
 
         case {'cmd':'generate', 'prompt':prompt, 'output_name': output_name, **other_args}:
-            print(f"🛈  Order Item {task['traceback_label']}: 'generate' with {prompt=}, {output_name=} and {other_args=}.", file=stderr)
+            print(f"🛈  Order Item {task['traceback_label']}: 'generate' with {prompt=}, {output_name=} and {other_args=}.", file=log_sink)
 
             start_str             = other_args.pop('start_str', '')
             stop_str              = other_args.pop('stop_str', '')
@@ -1996,7 +1954,7 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
         leave = True # Thank god python does not have evil gotos.
         options = ["Save State", "Load State", "Reload and Restart", "Quit"]
         choice = options[await InputOutputManager().select_index(options, description = f"\n{status}")]
-        print(f"🛈 user picked '{choice}'", file=stderr)
+        print(f"🛈 user picked '{choice}'", file=log_sink)
         match choice:
             case "Save State":
 
@@ -2019,7 +1977,7 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
                 save(program, state, filepath)
 
                 status = f"\nSaved '{save_state_label}' to slot {choice_i+1}.\n"
-                print(f"🛈 saved slot {choice_i+1}", file=stderr)
+                print(f"🛈 saved slot {choice_i+1}", file=log_sink)
 
             case "Load State":
 
@@ -2038,7 +1996,7 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
                 state['output'] = state.get('output','') # HACK
                 await InputOutputManager().write(state['output'])
                 status = f"\nLoaded '{state['label']}' from slot {choice_i+1}.\n"
-                print(f"🛈 Loaded slot {choice_i+1} ({labels[choice_i]}).", file=stderr)
+                print(f"🛈 Loaded slot {choice_i+1} ({labels[choice_i]}).", file=log_sink)
 
             case "Reload and Restart":
 
@@ -2055,7 +2013,7 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
                 named_tasks.update(deepcopy(program.get('tasks',{})))
                 await InputOutputManager().write('\n'*os.get_terminal_size().lines) # clear text
                 status = f"\nRestarted Program after reloading.\n"
-                print(f"🛈 Restarted Program.", file=stderr)
+                print(f"🛈 Restarted Program.", file=log_sink)
 
             case "Quit":
                 global killme
@@ -2233,10 +2191,10 @@ def load(filepath) -> (dict, dict):
     # Check if file changed.
     new_disk_program_hash = md5(file_content.encode()).hexdigest()
     if new_disk_program_hash == disk_program_hash:
-        print(f"🛈  Load cache hit.", file=stderr)
+        print(f"🛈  Load cache hit.", file=log_sink)
         program = deepcopy(disk_program_cache)
     else:
-        print(f"🛈  Load cache miss.", file=stderr)
+        print(f"🛈  Load cache miss.", file=log_sink)
         if filepath.endswith('.prog'):
             program = parse_prog_file(file_content)
         elif filepath.endswith('.json5'):
@@ -2268,10 +2226,10 @@ def save(program, state, filepath):
 
     program_hash = md5(new_content.encode()).hexdigest()
     if program_hash == disk_program_hash:
-        print(f"🛈  Save cache hit, no need to write.", file=stderr)
+        print(f"🛈  Save cache hit, no need to write.", file=log_sink)
         return
     else:
-        print(f"🛈  Save cache miss.", file=stderr)
+        print(f"🛈  Save cache miss.", file=log_sink)
         with open(filepath, 'w') as f:
             f.write(new_content)
     
@@ -2331,11 +2289,11 @@ async def async_main(filepath, args):
             pass
 
         if killme:
-            print(f"🛈 Terminated by user.", file=stderr)
+            print(f"🛈 Terminated by user.", file=log_sink)
             break
 
     else:
-        print(f"🛈 Reached end of order list.", file=stderr)
+        print(f"🛈 Reached end of order list.", file=log_sink)
 
     # IOM only gets started if at least one task exists.
     if len(program['order']) > 0: 
@@ -2347,15 +2305,6 @@ async def async_main(filepath, args):
 
 def main(): # cli entry point
 
-    # errors and debug info should go to a log file if passed
-    # it may seem hacky to overwrite sys.stderr but if a user passed --log
-    # they probably also want exceptions to be logged.
-    def configure_stderr(log_path):
-        global stderr
-        if log_path:
-            log_handle = open(log_path, "a")
-            sys.stderr = log_handle
-            stderr = log_handle
 
     parser = argparse.ArgumentParser(
         description="Run an interpolation-engine program.",
@@ -2373,7 +2322,10 @@ def main(): # cli entry point
         help="Optional directory to load inserts from when a key is not found in state['inserts'].",
     )
     args = parser.parse_args()
-    configure_stderr(args.log_path)
+
+    global log_sink
+    log_sink = open(log_path, "a") if args.log_path else open(os.devnull, 'w')
+
     if not args.program:
         print("Error: specify a program (.json5 file) to run.")
         return
