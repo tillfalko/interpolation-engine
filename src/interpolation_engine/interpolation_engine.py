@@ -2328,7 +2328,7 @@ def main(): # cli entry point
     args = parser.parse_args()
 
     global log_sink
-    log_sink = open(log_path, "a") if args.log_path else open(os.devnull, 'w')
+    log_sink = open(args.log_path, "a") if args.log_path else open(os.devnull, 'w')
 
     if not args.program:
         print("Error: specify a program (.json5 file) to run.")
