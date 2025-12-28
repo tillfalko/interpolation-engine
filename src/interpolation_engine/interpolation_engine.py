@@ -2308,12 +2308,16 @@ def main(): # cli entry point
 
     parser = argparse.ArgumentParser(
         description="Run an interpolation-engine program.",
+        allow_abbrev=False,
     )
     parser.add_argument("program", nargs="?", help="Path to the .json5 program file.")
     parser.add_argument(
         "program_arguments",
-        nargs=argparse.REMAINDER,
-        help="Any extra positional arguments are passed to the program where they are accessible with '{ARG1}', '{ARG2}' and so on.",
+        nargs="*",
+        help=(
+            "Extra positional arguments passed to the program and accessible via '{ARG1}', '{ARG2}', etc. "
+            "Use '--' before arguments that start with '-'."
+        ),
     )
     parser.add_argument("--log", dest="log_path", help="Specify a path to store log info at (recommended).")
     parser.add_argument(
