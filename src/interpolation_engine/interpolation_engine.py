@@ -39,8 +39,9 @@ your state['inserts'] would need to look like this:
         ...
     }
 
-If an inerpolation key is not defined in state['inserts'], it will be looked for as a file in
-`./inserts`. This is a convenient way to define inserts globally, for all programs.
+If an inerpolation key is not defined in state['inserts'], it can be looked up as a file in
+an inserts directory passed via `--inserts-dir`. This is a convenient way to define inserts globally,
+for all programs.
 
 Special Interpolation keys:
     'HH:MM': Current time as HH:MM.
@@ -200,6 +201,7 @@ error_style = Style.from_dict({
 insert_start='{'
 insert_stop='}'
 escape = '\\' # Use this to escape '{' and '}'.
+inserts_dir = None
 
 # TODO: expose
 client = AsyncOpenAI(base_url="http://127.0.0.1:8080", api_key="unused")
@@ -510,18 +512,22 @@ def get_interpdata(inserts, insertkey: str):
         case insertkey:
             if insertkey in inserts:
                 return inserts[insertkey]
-            else:
+            if inserts_dir:
                 try:
                     try:
-                        with open('inserts/'+insertkey+'.json5') as f:
+                        with open(os.path.join(inserts_dir, f"{insertkey}.json5")) as f:
                             return json5.loads(f.read())
                     except FileNotFoundError:
-                        with open('inserts/'+insertkey) as f:
+                        with open(os.path.join(inserts_dir, insertkey)) as f:
                             return f.read().strip()
                 except FileNotFoundError:
-                    raise InterpolationException((
-                        f"Could not find variable '{insertkey}' in interpdata or inserts directory. "
-                        f"Available interpolation data keys are {list(inserts.keys())}."))
+                    pass
+            missing_detail = " in interpdata"
+            if inserts_dir:
+                missing_detail += f" or inserts directory '{inserts_dir}'"
+            raise InterpolationException((
+                f"Could not find variable '{insertkey}'{missing_detail}. "
+                f"Available interpolation data keys are {list(inserts.keys())}."))
 
 
 def set_interpdata(inserts, insertkey: str, insertvalue: str):
@@ -1021,11 +1027,19 @@ def validate_program(program):
     # It is not possible to know beforehand what content inserts will have
     # so I cannot know for certain if a task tries to interpolate 
     # an unset key. But I can check if it tries to interpolate a key
-    # that never ever will be defined in program, nor is a member of 'inserts/'.
+    # that never ever will be defined in program, nor is a member of the inserts dir.
     all_insertkeys_ever_available = set(program['default_state']['inserts'].keys())
     # add special inserts
     all_insertkeys_ever_available |= {'HH:MM', 'HH:MM:SS'}
-    all_insertkeys_ever_available |= { s.split('inserts/')[1].split('.json5')[0] for s in glob('inserts/*') }
+    if inserts_dir:
+        insert_files = glob(os.path.join(inserts_dir, '*'))
+        insert_keys = []
+        for path in insert_files:
+            filename = os.path.basename(path)
+            if filename.endswith('.json5'):
+                filename = filename[:-len('.json5')]
+            insert_keys.append(filename)
+        all_insertkeys_ever_available |= set(insert_keys)
     tasks_to_check = program['order'].copy() + list(program['tasks'].values())
     for i,task in enumerate(tasks_to_check):
         assert 'line' in task, f"This task does not have a 'line' key: {task}"
@@ -2354,11 +2368,22 @@ def main(): # cli entry point
         help="Any extra positional arguments are passed to the program where they are accessible with '{ARG1}', '{ARG2}' and so on.",
     )
     parser.add_argument("--log", dest="log_path", help="Specify a path to store log info at (recommended).")
+    parser.add_argument(
+        "--inserts-dir",
+        dest="inserts_dir",
+        help="Optional directory to load inserts from when a key is not found in state['inserts'].",
+    )
     args = parser.parse_args()
     configure_stderr(args.log_path)
     if not args.program:
         print("Error: specify a program (.json5 file) to run.")
         return
+    if args.inserts_dir:
+        if not os.path.isdir(args.inserts_dir):
+            print(f"Error: --inserts-dir must be an existing directory, got '{args.inserts_dir}'.")
+            return
+        global inserts_dir
+        inserts_dir = args.inserts_dir
 
     state = asyncio.run(async_main(args.program, args.program_arguments))
 
