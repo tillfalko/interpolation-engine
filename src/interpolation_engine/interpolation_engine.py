@@ -628,7 +628,6 @@ def get_wildcard_matches(wildcard_s, s):
     return result
 
 import json
-from ollama import AsyncClient
 from typing import Literal
 from pydantic import BaseModel
 
