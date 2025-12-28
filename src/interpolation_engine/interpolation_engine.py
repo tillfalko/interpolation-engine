@@ -2334,7 +2334,7 @@ async def async_main():
     return state
 
 def main(): # cli entry point
-    state = asyncio.run(main())
+    state = asyncio.run(async_main())
 
 if __name__ == '__main__':
     main()
