@@ -1,24 +1,167 @@
 Interpolation Engine is a CLI tool to execute programs defined by JSON5 files.
 
-**Why JSON5?** Valid programs are a subset of JSON5. JSON is unambiguous, easy to parse, fast to parse, and easy to write for experienced programmers. It is can express the nested structures that Interpolation Engine requires. I use JSON5 because I want comments, trailing commas, and optional quotes for keys.
-
 ## Installation
 ```
 pip install interpolation-engine
 ```
 
 ## Usage
+Start a program with
 ```
 interpolation_engine my_program.json5
 ```
+Press `escape` at any time to toggle the main menu. Opening the menu stops program execution. Closing the menu resumes execution. From them menu you can save and load runtime states. Saved states are stored in the program file.
+Hold shift to select text.
+When prompted for text input you can press ctrl-n to enter linebreaks.
 
-## Command Reference
+## Writing Programs
+
+#### General Architecture
+
+Interpolation Engine expects to be passed a JSON5 file, this file is called a `program` as it defines
+a unique set of behaviors using a domain specific language.
+
+The behavior is defined by the `order` key of the program, which is a list of tasks.
+
+A `task`, is an object and it has a structure like `{cmd: 'print', text:'Hello!\n'}`
+In the simplest case this can look like `{cmd: 'print', text:'My name is {name}.'}` 
+**Every value supports string interpolation.** Even the interpolation keys 
+ `{cmd: 'user_input', prompt:'{question-{i}}', output_name:'{user_name}/answer-{i}'}`
+
+The values that can be interpolated into strings are called `inserts`. The inserts a program can access are the inserts in `program['default_state']['inserts']` + the inserts you define at runtime + the inserts in inserts-dir, if this argument was passed.
+
+The order starts at `program['default_state']['order_index']` and will execute one task after another,
+incrementing the `order_index`.
+
+The order of executed tasks is affected by `goto`, `goto_map`. The tasks `serial`, `parallel_wait` and `parallel_race` execute sub-tasks (see below).
+
+Tasks are usually defined directly in the `program['order']`, but you can also define named tasks in  `program['tasks']`.
+There their key is a name by which they can be executed like `{cmd:'run_task', task_name:'print_current_status'}`.
+
+Using `serial`, a named task can be arbitrarily complex which is the closest thing Interpolation Engine has to factoring code into a function.
+
+`program['order']` and  `program['tasks']` are static. The complete runtime information is contained in it's so called `state`. `default_state` is simply the state that gets loaded when Interpolation Engine executes a program from the beginning. You can save and load the current state using the main menu.
+
+
+#### Interpolaton
+
+The contents of `state['inserts']` are mappings from keys to values.
+Values of type Int, String, and even List (by way of `''.join`) can be interpolated into strings.
+
+E.g. to use
+
+    {cmd: 'print', text:'My name is {name}.'}
+
+your `state['inserts']` would need to look like this:
+
+    inserts: {
+        name: 'tom',
+        ...
+    }
+
+If an inerpolation key is not defined in state['inserts'], it can be looked up as a file in
+an inserts directory passed via `--inserts-dir`. This is a convenient way to define inserts globally,
+for all programs.
+
+Special Interpolation keys:
+    - 'HH:MM': Current time as HH:MM.
+    - 'HH:MM:SS': Will be populated with the current time.
+    - 'ARG1': 'The first argument passed into the program, only defined if one was passed. `{` and `}` will be escaped.
+    - 'ARG2': 'The second argument passed into the program, only defined if one was passed. `{` and `}` will be escaped.
+    - 'ARG{n}': 'The n-th argument passed into the program, only defined if one was passed. `{` and `}` will be escaped.
+
+
+ESCAPING
+The text enclosed in interpolation start and stop strings '{' and '}' will always be eagerly interpolated.
+To escape this, use the escape string '//'. Unlike in other programming languages, these will not be 
+automatically un-escaped. This allows you to safely handle them without interpolating undefined variables.
+Use unescape to turn nested structures with escapes into their unescaped counterparts. This will also
+realize every interpolation.
+---
+
+OUTPUT
+When the program terminates without error, the last output will be printed to stdout. To not prevent this, clear the screen with 'clear' before exiting.
+
+---
+
+Note that the state exists only in the python runtime's memory, and program['default_state'] will not be
+updated. The user does have the option to save states to disk using the main menu.
+
+Pressing escape at any time will gracefully abort the current task and toggle the main menu
+where he can save his state to disk, or load the state from disk.
+
+States are stored in right in the program definition at program['save_states']. Currently I allow
+up to ten save slots with keys from '1' to '10'. The object saved at e.g. program['save_states']['1'] is
+simply the current state plus a string label that the user has to enter.
+
+Because comments and custom indentation is useful for writing and reasong program['order'], saving is done
+by editing the program as a string instead of using json5.dump.
+
+INDEXING
+Indices in the program are 1-based with right-left-inclusive slicing and -1, -2, ... denoting the last, penultimate, ... indices.
+
+
+goto_map:
+    Description:
+        goto_map is a conditional goto and can act as an if statement. You can use '*' as wildcards
+        to match any substring. goto_map can have multiple overlapping matches, e.g. 'brown *' and
+        '* hair'. In this case the first one will be selected; this is why we need to use a list of
+        dicts, to preserve order.
+        The value with the key 'NULL' will be selected when an interpolation in 'value_text' could not
+        be resolved. This is useful to test if a certain value has been defined.
+    Inputs:
+        - value_text (str) : a text.
+        - target_maps (list[dict]) : a list of dicts, each dict consists of only one key, representing the string value_text has to match. The value is the name of the label it will go to if the key matches. The keys may use wildcards, '*', to match patterns or the special key,
+            'NULL', to check if an interpolation in value_text could not be resolved. The list order is relevant as the first match will be used. The value 'CONTINUE' may also be used. If a key with the value 'CONTINUE' is matched, `goto_map` will be a no-op and the order index will increase by one.
+
+
+    Output:
+        None
+    Example:
+    ```
+        {cmd:'goto_map', value_text:'{user_input}', target_maps:[
+            {'/help':'@help'},
+            {'/restart':'@restart'},
+            {'/undo':'@undo'},
+            {'*':'@normal_input'}
+        ]},
+    ```
+
+replace_map:
+    Description:
+        Extracts text swallowed by a wildcard ('*').
+    Inputs:
+        - item (str/list/dict) : The source.
+        - output_name (str) : The name of the insert variable that the output will be assigned to.
+        - repeat_until_done (bool, optional) : If true, continue until no more wildcard maps can be applied. Defaults to false.
+        - block_interpolation (bool, optional) : If true, interpolations in the input text will not be applied. Defaults to false.
+        - wildcard_maps (list[dict]) : a list of dicts, each dict consists of only one key, representing
+            the string value_text has to match, these can include wildcards. The value is the text that
+            will be assigned to output_name. Each wildcard in the key will make the text it swallowed
+            available in the corresponding value with the special insert keys 1,2,...
+            The key 'NULL' will be used if there was an interpolation error.
+
+    Output:
+        None
+    Example:
+    ```
+        // This example assigns 'Jerren-64' to 'user_info'.
+        {cmd:'replace_map', item:'My name is Jerren and I am 64 years old', output_name:'user_info', wildcard_maps:[
+            {'My name is * and I am * years old.':'{1}-{2}'},
+            {'NULL':'(unknown)'},
+        ]},
+    ```
+
+
+
+
+**Why JSON5?** Valid programs are a subset of JSON5. JSON is unambiguous, easy to parse, fast to parse, and easy to write for experienced programmers. It is can express the nested structures that Interpolation Engine requires. I use JSON5 because I want comments, trailing commas, and optional quotes for keys.
 
 This is a list of all valid Interpolation Engine commands.
 
 #### `print`
 Fields: `text`<br>
-Appends text to output and writes it to the screen.<br>
+Prints text to the user. Does not add a linebreak.<br>
 Example:<br>
 ```json5
 {cmd: "print", text: "Hello\n"}
@@ -225,7 +368,7 @@ Example:<br>
 
 #### `math`
 Fields: `input`, `output_name`<br>
-Evaluates a math expression and stores the integer result.<br>
+Evaluates a mathematical expression. Result must be an integer. Useful for list index manipulation, counters and advanced control flow.<br>
 Supports `+ - * / %` and parentheses; expressions are interpolated before evaluation.<br>
 Functions: `length(name)`, `min(list_or_csv)`, `max(list_or_csv)`, `round(expr)`, `sign(expr)`.<br>
 Example:<br>
