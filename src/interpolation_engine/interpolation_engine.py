@@ -29,11 +29,6 @@ from prompt_toolkit.widgets import TextArea, Label, SearchToolbar
 from prompt_toolkit.data_structures import Point
 
 
-startup_text = """Hold shift to select text.
-Use ctrl-n to enter linebreaks.
-Press escape to toggle the main menu. This interrupts whatever you were doing.
-"""
-
 prompt_history = FileHistory('_program_prompt_history') # TODO
 #prompt_history = InMemoryHistory() # global so that reloading doesn't destroy it
 
@@ -2054,7 +2049,7 @@ def load(filepath) -> (dict, dict):
     
     # Create a deep copy so that the default state will not be affected by anything I do.
     state = deepcopy(program['default_state'])
-    state['output'] = state.get('output', startup_text)
+    state['output'] = state.get('output', '')
 
     return program, state
 
@@ -2100,7 +2095,7 @@ async def async_main(filepath, args):
         await InputOutputManager().start()
         await asyncio.sleep(0)
 
-        await InputOutputManager().write(state.get('output',startup_text))
+        await InputOutputManager().write(state.get('output',''))
 
     while state['order_index'] <= len(program['order']): # order_index is 1-based.
 
