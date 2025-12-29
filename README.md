@@ -71,15 +71,14 @@ Special Interpolation keys:
     - 'ARG{n}': 'The n-th argument passed into the program, only defined if one was passed. `{` and `}` will be escaped.
 
 
-ESCAPING
+#### Escaping
 The text enclosed in interpolation start and stop strings '{' and '}' will always be eagerly interpolated.
 To escape this, use the escape string '//'. Unlike in other programming languages, these will not be 
 automatically un-escaped. This allows you to safely handle them without interpolating undefined variables.
 Use unescape to turn nested structures with escapes into their unescaped counterparts. This will also
 realize every interpolation.
----
 
-OUTPUT
+#### Output
 When the program terminates without error, the last output will be printed to stdout. To not prevent this, clear the screen with 'clear' before exiting.
 
 ---
@@ -97,62 +96,8 @@ simply the current state plus a string label that the user has to enter.
 Because comments and custom indentation is useful for writing and reasong program['order'], saving is done
 by editing the program as a string instead of using json5.dump.
 
-INDEXING
+#### Indexing
 Indices in the program are 1-based with right-left-inclusive slicing and -1, -2, ... denoting the last, penultimate, ... indices.
-
-
-goto_map:
-    Description:
-        goto_map is a conditional goto and can act as an if statement. You can use '*' as wildcards
-        to match any substring. goto_map can have multiple overlapping matches, e.g. 'brown *' and
-        '* hair'. In this case the first one will be selected; this is why we need to use a list of
-        dicts, to preserve order.
-        The value with the key 'NULL' will be selected when an interpolation in 'value_text' could not
-        be resolved. This is useful to test if a certain value has been defined.
-    Inputs:
-        - value_text (str) : a text.
-        - target_maps (list[dict]) : a list of dicts, each dict consists of only one key, representing the string value_text has to match. The value is the name of the label it will go to if the key matches. The keys may use wildcards, '*', to match patterns or the special key,
-            'NULL', to check if an interpolation in value_text could not be resolved. The list order is relevant as the first match will be used. The value 'CONTINUE' may also be used. If a key with the value 'CONTINUE' is matched, `goto_map` will be a no-op and the order index will increase by one.
-
-
-    Output:
-        None
-    Example:
-    ```
-        {cmd:'goto_map', value_text:'{user_input}', target_maps:[
-            {'/help':'@help'},
-            {'/restart':'@restart'},
-            {'/undo':'@undo'},
-            {'*':'@normal_input'}
-        ]},
-    ```
-
-replace_map:
-    Description:
-        Extracts text swallowed by a wildcard ('*').
-    Inputs:
-        - item (str/list/dict) : The source.
-        - output_name (str) : The name of the insert variable that the output will be assigned to.
-        - repeat_until_done (bool, optional) : If true, continue until no more wildcard maps can be applied. Defaults to false.
-        - block_interpolation (bool, optional) : If true, interpolations in the input text will not be applied. Defaults to false.
-        - wildcard_maps (list[dict]) : a list of dicts, each dict consists of only one key, representing
-            the string value_text has to match, these can include wildcards. The value is the text that
-            will be assigned to output_name. Each wildcard in the key will make the text it swallowed
-            available in the corresponding value with the special insert keys 1,2,...
-            The key 'NULL' will be used if there was an interpolation error.
-
-    Output:
-        None
-    Example:
-    ```
-        // This example assigns 'Jerren-64' to 'user_info'.
-        {cmd:'replace_map', item:'My name is Jerren and I am 64 years old', output_name:'user_info', wildcard_maps:[
-            {'My name is * and I am * years old.':'{1}-{2}'},
-            {'NULL':'(unknown)'},
-        ]},
-    ```
-
-
 
 
 **Why JSON5?** Valid programs are a subset of JSON5. JSON is unambiguous, easy to parse, fast to parse, and easy to write for experienced programmers. It is can express the nested structures that Interpolation Engine requires. I use JSON5 because I want comments, trailing commas, and optional quotes for keys.
