@@ -34,10 +34,6 @@ from prompt_toolkit.data_structures import Point
 from time import time # deleteme
 
 
-prompt_history = FileHistory('_program_prompt_history') # TODO
-#prompt_history = InMemoryHistory() # global so that reloading doesn't destroy it
-
-
 error_style = Style.from_dict({
     '': 'red', # This also changes the text the user types.
 })
@@ -58,6 +54,9 @@ class InputOutputManager:
 
     def _init_once(self):
 
+        global prompt_history_path
+        self.prompt_history = FileHistory(prompt_history_path) if prompt_history_path else InMemoryHistory()
+
         self.show_prompt = False
         self.show_input_info = False
         self.prompt_text = '' # needs to be an instance variable
@@ -67,8 +66,6 @@ class InputOutputManager:
         self.output = Window(
             content=BufferControl(
                 buffer = self.output_buffer
-
-                #get_cursor_position=lambda: Point(0, self.output_row_position),
             ),
             #style='bg:red',
             wrap_lines=False,
@@ -87,7 +84,7 @@ class InputOutputManager:
             # No fixed height: let it size to content (incl. wrapping)
             height=None,
             dont_extend_height=True,
-            history=prompt_history,
+            history=self.prompt_history,
             #search_field=self.search,
             wrap_lines=True,
             # prompt can be a function. Here it is necessary because otherwise we couldn't update the prompt.
@@ -227,7 +224,7 @@ class InputOutputManager:
             @self.kb.add("enter")
             def _(event):
                 text = self.prompt.text
-                prompt_history.append_string(text)
+                self.prompt_history.append_string(text)
                 if self._input_future and not self._input_future.done():
                     self._input_future.set_result(text)
                 self.kb.remove('enter')
@@ -2028,6 +2025,7 @@ def main(): # cli entry point
         ),
     )
     parser.add_argument("--log", dest="log_path", help="Specify a path to store log info at (recommended).")
+    parser.add_argument("--history", dest="prompt_history", help="Path to store input history at. Settings this allows you to re-enter inputs from other sessions by hitting UP.")
     parser.add_argument(
         "--inserts-dir",
         dest="inserts_dir",
@@ -2035,8 +2033,9 @@ def main(): # cli entry point
     )
     args = parser.parse_args()
 
-    global log_sink
+    global log_sink, prompt_history_path
     log_sink = open(args.log_path, "a") if args.log_path else open(os.devnull, 'w')
+    prompt_history_path = args.prompt_history if args.prompt_history else None
 
     if not args.program:
         print("Error: specify a program (.json5 file) to run.")
