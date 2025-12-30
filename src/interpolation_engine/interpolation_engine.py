@@ -7,6 +7,7 @@ from signal import SIGINT
 from typing import Literal
 import argparse
 import asyncio # for parallel generation
+import json # used only for dumping pydantic schema in structured generation
 import json5
 from openai import AsyncOpenAI
 import os
@@ -14,6 +15,8 @@ import random # for random.choice
 import re
 import sys
 from datetime import datetime # for the 'HH:MM' special insertkey
+from typing import Literal
+from pydantic import BaseModel
 
 from prompt_toolkit import PromptSession, print_formatted_text, prompt # prompt function is used instead of `input` the user enters text.
 from prompt_toolkit.application import Application
@@ -28,6 +31,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea, Label, SearchToolbar
 from prompt_toolkit.data_structures import Point
+from time import time # deleteme
 
 
 prompt_history = FileHistory('_program_prompt_history') # TODO
@@ -42,10 +46,6 @@ insert_start='{'
 insert_stop='}'
 escape = '\\' # Use this to escape '{' and '}'.
 inserts_dir = None
-
-# TODO: expose
-client = AsyncOpenAI(base_url="http://127.0.0.1:8080", api_key="unused")
-
 
 class InputOutputManager:
     _instance = None
@@ -465,9 +465,9 @@ def get_wildcard_matches(wildcard_s, s):
 
     return result
 
-import json
-from typing import Literal
-from pydantic import BaseModel
+
+# caching
+client = last_api_url = last_api_key = None
 
 async def chat(
         messages,
@@ -479,6 +479,8 @@ async def chat(
         n_outputs,
         shown,
         choices_list,
+        api_url,
+        api_key,
         extra_body,
     ):
     """
@@ -508,6 +510,16 @@ async def chat(
     if choices_list != None:
         assert start_str == stop_str == "", "Filtering is not supported when using choices."
         assert n_outputs == 1, "Multiple outputs not supported when using choices."
+
+
+    global client, last_api_url, last_api_key # recreating the client takes 100ms-200ms, caching
+    if last_api_url != api_url or last_api_key != api_key:
+        client = AsyncOpenAI(base_url=api_url, api_key=api_key)
+        last_api_url = api_url
+        last_api_key = api_key
+
+
+
 
     raw = ""
     visual_output = ""
@@ -1682,25 +1694,29 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
 
         case {'cmd':'chat', 'messages':messages, 'output_name': output_name, **other_args}:
 
-            start_str             = other_args.pop('start_str', '')
-            stop_str              = other_args.pop('stop_str', '')
-            hide_start_str        = other_args.pop('hide_start_str', '')
-            hide_stop_str         = other_args.pop('hide_stop_str', '')
-            n_outputs             = other_args.pop('n_outputs', 1)
-            shown                 = other_args.pop('shown', True)
-            choices_list          = other_args.pop('choices_list', None)
-            extra_body            = other_args.pop('extra_body', {})
-            _                     = other_args.pop('traceback_label', None)
-            _                     = other_args.pop('line', None)
+            completion_args = deepcopy(completion_args)
+            other_args['extra_body'] = other_args.get('extra_body',{})
+            other_args['extra_body'].update(completion_args.pop('extra_body',{}))
+            completion_args.update(other_args)
+
+            start_str             = completion_args.pop('start_str', '')
+            stop_str              = completion_args.pop('stop_str', '')
+            hide_start_str        = completion_args.pop('hide_start_str', '')
+            hide_stop_str         = completion_args.pop('hide_stop_str', '')
+            n_outputs             = completion_args.pop('n_outputs', 1)
+            shown                 = completion_args.pop('shown', True)
+            choices_list          = completion_args.pop('choices_list', None)
+            extra_body            = completion_args.pop('extra_body', {})
+            api_url               = completion_args.pop('api_url', 'http://localhost:8080') # default for llama.cpp 
+            api_key               = completion_args.pop('api_key', 'unused') # required by openai even if not used
+            _                     = completion_args.pop('traceback_label', None)
+            _                     = completion_args.pop('line', None)
 
             n_outputs = int(n_outputs) if type(n_outputs) is str and n_outputs.isnumeric() else n_outputs
             shown = True if shown == 'true' else shown
             shown = False if shown == 'false' else shown
             assert type(shown) == bool
 
-            completion_args = deepcopy(completion_args)
-            extra_body.update(completion_args.pop('extra_body',{}))
-            completion_args.update(other_args)
 
             # max_completion_tokens is the proper argument going forward according to the openai
             # api, but it's broken in llama.cpp so we use max_tokens
@@ -1721,6 +1737,8 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                     n_outputs=n_outputs,
                     shown=shown,
                     choices_list=choices_list,
+                    api_url=api_url,
+                    api_key=api_key,
                     extra_body=extra_body
                 )
 
@@ -1736,7 +1754,9 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                 state['output'] += visual_output
                 break
 
+        
         case {'cmd':'generate', 'prompt':prompt, 'output_name': output_name, **other_args}:
+            # TODO: depreciate generate, broken and useless
             print(f"🛈  Order Item {task['traceback_label']}: 'generate' with {prompt=}, {output_name=} and {other_args=}.", file=log_sink)
 
             start_str             = other_args.pop('start_str', '')
