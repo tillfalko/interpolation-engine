@@ -173,8 +173,7 @@ class InputOutputManager:
 
         # Use the end-of-buffer column for wrapping, not the cursor position.
         last_line = old_doc.text.rsplit('\n', 1)[-1]
-        end_col = len(last_line)
-        free_space = ri.window_width - end_col
+        free_space = ri.window_width -len(last_line) 
         to_print = ''
 
         while text != '':
