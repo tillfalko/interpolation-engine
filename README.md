@@ -1,4 +1,6 @@
-> Interpolation Engine is a CLI tool to execute programs defined by JSON5 files.
+## Interpolation Engine
+
+Interpolation Engine is a CLI tool to execute programs defined by JSON5 files.
 
 ## Installation
 ```
