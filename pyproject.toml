@@ -19,6 +19,9 @@ dependencies = [
     "pydantic",
 ]
 
+[project.urls]
+Repository = "https://github.com/tillfalko/interpolation-engine"
+
 [project.scripts]
 interpolation-engine = "interpolation_engine.interpolation_engine:main"
 
