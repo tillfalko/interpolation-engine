@@ -20,17 +20,24 @@ When prompted for text input you can press ctrl-n to enter linebreaks.
 
 #### General Architecture
 
-Interpolation Engine expects to be passed a JSON5 file, this file is called a `program` as it defines
-a unique set of behaviors using a domain specific language.
+Interpolation Engine expects to be passed a JSON5 file. This file needs to have a certain structure. I will call JSON5 a file with this structure a `program`. Before reading on, check out the `examples` directory. Its often easier to learn from an example than from an explaination.      
 
-The behavior is defined by the `order` key of the program, which is a list of tasks.
+The behavior of a program is defined by the `order` list, the elements of which are tasks.
 
-A `task`, is an object and it has a structure like `{cmd: 'print', text:'Hello!\n'}`
-In the simplest case this can look like `{cmd: 'print', text:'My name is {name}.'}` 
-**Every value supports string interpolation.** Even the interpolation keys 
- `{cmd: 'user_input', prompt:'{question-{i}}', output_name:'{user_name}/answer-{i}'}`
+There are 28 commands in Interpolation Engine, and you can think of a task as a function call to one of these commands.
+Here is what a task look like `{cmd: 'print', text:'My name is {name}.'}` 
+You can see that a value with the key `name` is being interpolated into the string. This is not unique to the print command, in fact **every string** in interpolation engine can use interpolations.
+ ```
+{cmd: 'user_input', prompt:'{question-{i}}', output_name:'{persona_name}/answer-{i}'}
+```
+Take a look at the `prompt` value. Here we have some kind of index `i` that we interpolate to get something like `question-3`. Around all of this are another set of interpolation parentheses, meaning that interpolation engine will look up the value saved under `question-3` and display this as the prompt to the user.
 
-The values that can be interpolated into strings are called `inserts`. The inserts a program can access are the inserts in `program['default_state']['inserts']` + the inserts you define at runtime + the inserts in inserts-dir, if this argument was passed.
+Now consider the `output_name` value. (Commands that produce an output require an `output_name` specifying the insert key under which it will be stored, like a variable name.) Here we see that the `output_name` is also being interpolated. Perhaps this program is asking the user to answer questions as various personas. The slash in the output name is not syntactically relevant, but I find it helpful to structure my insert keys hierarchically. E.g. in this example if you wanted to delete anything related to the persona `Benjamin` you could use
+```
+{cmd:'delete', wildcards:['Benjamin/*'}
+```
+
+The values that can be interpolated into strings are called `inserts`. The inserts a program can access are the inserts in `program['default_state']['inserts']` + the inserts you define at runtime + the inserts in `inserts-dir`, if that argument was passed.
 
 The order starts at `program['default_state']['order_index']` and will execute one task after another,
 incrementing the `order_index`.
