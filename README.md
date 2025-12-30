@@ -92,17 +92,17 @@ When the program terminates without error, the last output will be printed to st
 
 ---
 
-Note that the state exists only in the python runtime's memory, and program['default_state'] will not be
+Note that the state exists only in the python runtime's memory, and `program['default_state']` will not be
 updated. The user does have the option to save states to disk using the main menu.
 
 Pressing escape at any time will gracefully abort the current task and toggle the main menu
 where he can save his state to disk, or load the state from disk.
 
-States are stored in right in the program definition at program['save_states']. Currently I allow
-up to ten save slots with keys from '1' to '10'. The object saved at e.g. program['save_states']['1'] is
+States are stored in right in the program definition at `program['save_states']`. Currently I allow
+up to ten save slots with keys from '1' to '10'. The object saved at e.g. `program['save_states']['1']` is
 simply the current state plus a string label that the user has to enter.
 
-Because comments and custom indentation is useful for writing and reasong program['order'], saving is done
+Because comments and custom indentation is useful for writing and reading the program's `order`, saving is done
 by editing the program as a string instead of using json5.dump.
 
 #### Indexing
