@@ -607,94 +607,6 @@ async def chat(
     return [o.strip() for o in outputs], visual_output
 
 
-async def generate(
-        prompt,
-        completion_args,
-        start_str,
-        stop_str,
-        hide_start_str,
-        hide_stop_str,
-        n_outputs,
-        shown
-    ):
-    """
-    Generates output live while printing and filtering out e.g. <output>.
-    Does not use a chat format. Generates 'raw'.
-    Can extract multiple outputs when `n_outputs > 1`. If `shown==True`, the outputs will be enumerated from 1.
-    Args:
-        Required:
-            prompt (str) : The raw prompt.
-            completion_args (dict) : args in the format required by ollama.chat to set e.g. 'model'.
-        Optional:
-            start_str (str) : What delimits the start of an output. E.g. '<output>'.
-            stop_str (str) : What delimits the end of an output. E.g. '</output>'.
-            hide_start_str (str) : E.g. '<think>'. Text between hide_start_str and hide_stop_str will not be printed.
-            hide_stop_str (str) : E.g. '</think>'
-            n_outputs (int) : The amount of outputs expected. Can be -1 to be unlimited.
-            shown (bool) : Whether to print what is being generated to stdout.
-    Returns:
-        if n_outputs == 1:
-            output (str) : The generated output with start_str and stop_str removed.
-        else:
-            outputs (list[str]) : A list of generated outputs with start_str and stop_str removed.
-    """
-    
-    assert bool(start_str) == bool(stop_str), "You can either set both start_str and stop_str or none. Right now you have only set one of them."
-
-    raw = ""
-    visual_output = ""
-    aborted = False
-    print(
-        f"🛈  Starting generation with these completion_args: {completion_args}",
-        file=log_sink,
-    )
-
-    try:
-
-        # Ensure stop is in options
-        completion_args['options'] = completion_args.get('options', {})
-        completion_args['options']['stop'] = completion_args['options'].get('stop', [])
-        # Set stop if n == 1.
-        if n_outputs == 1 and stop_str:
-            completion_args['options']['stop'].append(stop_str)
-
-        response = await client.generate(
-            prompt=prompt,
-            keep_alive=-1,
-            stream=True,
-            raw=True,
-            **completion_args)
-
-        hide_filter = inverted_filter(hide_start_str, hide_stop_str)
-        extract_outputs,outputs = filter(start_str, stop_str, enumerate_outputs = n_outputs > 1)
-        async for comp in await response:
-            delta = comp['response']
-            chunk = comp.choices[0]
-            delta = chunk.delta.content
-            if not delta is None:
-                raw += delta
-
-                fragment = extract_outputs(delta)
-                if shown:
-                    visual_fragment = hide_filter(fragment)
-                    await InputOutputManager().write(visual_fragment)
-                    visual_output += visual_fragment
-
-
-    except BaseException as e:
-        # Log Output even if interrupted.
-        log_messages( [{'role':'prompt','content':prompt}, {'role':'completion','content':raw}] )
-        raise e
-
-    if shown:
-        await InputOutputManager().write('\n')
-        visual_output += '\n'
-
-    log_messages( [{'role':'prompt','content':prompt}, {'role':'completion','content':raw}] )
-
-    return [o.strip() for o in outputs], visual_output
-
-
 math_legal_terminals = set(" .0123456789+-*/%")
 
 def math_safe_eval(s):
@@ -1250,22 +1162,6 @@ def validate_program(program):
                             assert 'content' in message, f"{task['traceback_label']}: 'Message number {i+1} does not have 'role'."
                             assert message['role'] in ('user', 'system', 'assistant'), f"{task['traceback_label']}: 'Message number {i+1} has unknown role '{message['role']}'."
 
-            case {'cmd':'generate', **args}:
-                
-                arg_set = set(args) # Set only considers the keys of a dict.
-                required_args = {'prompt', 'output_name'}
-
-                permitted_args = {
-                    'prompt', 'output_name', 'n_outputs', 'start_str', 'stop_str', 'hide_start_str', 'hide_stop_str', 'shown', 'traceback_label', 'line', 'model',
-                    # The rest are ollama options (https://github.com/ollama/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values)
-                    'num_ctx', 'repeat_last_n', 'repeat_penalty', 'temperature', 'seed', 'stop', 'num_predict','top_k', 'top_p', 'min_p'
-                }
-                if 'completion_args' not in program:
-                    required_args |= {'model'}
-
-                assert ('start_str' in arg_set) == ('stop_str' in arg_set), f"{task['traceback_label']}: You can either set both start_str and stop_str or none. Right now you have only set one of them."
-                assert arg_set <= permitted_args, f"{task['traceback_label']}: generate has illegal arguments {arg_set - permitted_args}."
-                assert arg_set >= required_args, f"{task['traceback_label']}: generate is missing required arguments {required_args - arg_set}."
 
             case somethingelse:
                 raise Exception(f"{task['traceback_label']}: Found unexpected task: {somethingelse}.")
@@ -1755,56 +1651,6 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                 break
 
         
-        case {'cmd':'generate', 'prompt':prompt, 'output_name': output_name, **other_args}:
-            # TODO: depreciate generate, broken and useless
-            print(f"🛈  Order Item {task['traceback_label']}: 'generate' with {prompt=}, {output_name=} and {other_args=}.", file=log_sink)
-
-            start_str             = other_args.pop('start_str', '')
-            stop_str              = other_args.pop('stop_str', '')
-            hide_start_str        = other_args.pop('hide_start_str', '')
-            hide_stop_str         = other_args.pop('hide_stop_str', '')
-            n_outputs             = other_args.pop('n_outputs', 1)
-            shown                 = other_args.pop('shown', True)
-            _                     = other_args.pop('traceback_label', None)
-
-            n_outputs = int(n_outputs) if type(n_outputs) == str else n_outputs
-            shown = bool(shown) if type(shown) == str else shown
-
-            completion_args = deepcopy(completion_args)
-            # model is one of the few settable ollama options that do not go in 'options'
-            completion_args['model'] = other_args.pop('model', completion_args['model'])
-
-
-            # All other other_args are assumed to be generation options in the ollama sense.
-            # validate_program enforces that all args passed will be valid ollama options.
-            completion_args['options'] = completion_args.get('options', {})
-            completion_args['options'].update(other_args)
-
-            while True:
-                # Output may be a list, but visual_output is always a str and it 
-                # does not include text filtered with hide_start_str.
-                output, visual_output = await generate(
-                    prompt=prompt,
-                    completion_args=completion_args,
-                    start_str=start_str,
-                    stop_str=stop_str,
-                    hide_start_str=hide_start_str,
-                    hide_stop_str=hide_stop_str,
-                    n_outputs=n_outputs,
-                    shown=shown)
-
-                if len(output) < n_outputs:
-                    await InputOutputManager().write(f"\n(Expected {n_outputs} outputs, got {len(output)}. Retrying.)\n")
-                    await asyncio.sleep(2)
-                    continue
-                elif len(output) == 1:
-                    set_interpdata(inserts, output_name, output[0])
-                else:
-                    set_interpdata(inserts, output_name, output)
-
-                state['output'] += visual_output
-                break
-
         case somethingelse:
             raise Exception(f"Got unprocessable task: {somethingelse}.\nThis should have been caught during validation and is a bug!")
 
