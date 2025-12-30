@@ -22,6 +22,7 @@ from prompt_toolkit.history import InMemoryHistory, FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import ConditionalContainer, Layout, HSplit, ScrollablePane, Window, ScrollOffsets
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.document import Document
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
@@ -137,7 +138,7 @@ class InputOutputManager:
         self._app_task = None
 
     async def start(self):
-        """Start the prompt_toolkit app in the <D-z>background."""
+        """Start the prompt_toolkit app in the background."""
         if self._app_task is None:
             self._app_task = asyncio.create_task(self.app.run_async())
 
@@ -157,39 +158,40 @@ class InputOutputManager:
         self.app.invalidate()
 
     async def write(self, text: str):
-        #cursor_position = self.output.window.render_info.cursor_position
-        #self.output.buffer.insert_text(text)
         ri = self.output.render_info
-        at_bottom = True
-        if ri:
-            # Check if the bottom is visible (accounts for wrapped lines)
-            at_bottom = (ri.vertical_scroll + ri.window_height >= ri.ui_content.line_count)
+        if ri is None: # ri is None when you try to write before InputOutputManager.start()
+            new_text = self.output_buffer.text + text
+            self.output_buffer.set_document(
+                Document(new_text, cursor_position=len(new_text)),
+                bypass_readonly=True,
+            )
+            self.app.invalidate()
+            return
 
-        old_cursor = self.output_buffer.cursor_position
+        old_doc = self.output_buffer.document
+        follow_output = old_doc.is_cursor_at_the_end
 
-        #self.output_buffer.read_only = False
-        try:
-            self.output_buffer.cursor_position = len(self.output_buffer.text)
-            free_space = ri.window_width - ri.cursor_position.x 
-            to_print = ''
+        # Use the end-of-buffer column for wrapping, not the cursor position.
+        last_line = old_doc.text.rsplit('\n', 1)[-1]
+        end_col = len(last_line)
+        free_space = ri.window_width - end_col
+        to_print = ''
 
-            while text != '':
-                to_print += text[0]
-                free_space = ri.window_width if text[0] == '\n' else free_space - 1
-                text = text[1:]
+        while text != '':
+            to_print += text[0]
+            free_space = ri.window_width if text[0] == '\n' else free_space - 1
+            text = text[1:]
 
-                if free_space < 1:
-                    text = '\n' + text
+            if free_space < 1:
+                text = '\n' + text
 
-            self.output_buffer.insert_text(to_print) 
-        finally:
-            pass
-            #self.output_buffer.read_only = True
+        new_text = old_doc.text + to_print
+        new_cursor = len(new_text) if follow_output else old_doc.cursor_position
+        self.output_buffer.set_document(
+            Document(new_text, cursor_position=new_cursor),
+            bypass_readonly=True,
+        )
 
-        if not at_bottom:
-            self.output_buffer.cursor_position = old_cursor
-
-        # Invalidate to ensure redraw if called outside the event loop
         self.app.invalidate()
 
     async def user_input(self, prompt: str, default :str = '') -> str:
@@ -2092,6 +2094,7 @@ async def async_main(filepath, args):
     named_tasks = program.get('tasks', {})
 
     if len(program['order']) > 0:
+
         await InputOutputManager().start()
         await asyncio.sleep(0)
 
