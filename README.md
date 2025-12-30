@@ -322,19 +322,10 @@ Example:<br>
 ```
 
 #### `chat`
-Fields: `messages`, `output_name`<br>
-Optional: `model` (required unless program-level `completion_args` supplies it)<br>
-Other optional args: `n_outputs`, `start_str`, `stop_str`, `hide_start_str`, `hide_stop_str`, `shown`, `choices_list_name`, `choices_list`, `extra_body`, `max_completion_tokens`, `temperature`, `seed`, `stop`<br>
+Fields: `messages`, `output_name`, `model`<br>
+Optional: `n_outputs`, `start_str`, `stop_str`, `hide_start_str`, `hide_stop_str`, `shown`, `choices_list_name`, `choices_list`, `extra_body`, `max_completion_tokens`, `temperature`, `seed`, `stop`, `api_url`, `api_key`<br>
+`chat` fields are joined with `program['completion_args']`. `chat` requires access to an OpenAI-API compatible endpoint. The default values for `api_url` and `api_key` are `http://localhost:8080` and `unused`, which assume that you have a llama.cpp server running locally. If you want to pass on generation parameters that are not supported by the OpenAI-API, use `extra_body`: `extra_body: {dry_base: 1.75}`
 Example:<br>
 ```json5
 {cmd: "chat", messages: [{role: "user", content: "Hi"}], output_name: "reply", model: "gpt-4o-mini"}
-```
-
-#### `generate`
-Fields: `prompt`, `output_name`<br>
-Optional: `model` (required unless program-level `completion_args` supplies it)<br>
-Other optional args: `n_outputs`, `start_str`, `stop_str`, `hide_start_str`, `hide_stop_str`, `shown`, `num_ctx`, `repeat_last_n`, `repeat_penalty`, `temperature`, `seed`, `stop`, `num_predict`, `top_k`, `top_p`, `min_p`<br>
-Example:<br>
-```json5
-{cmd: "generate", prompt: "Say hello", output_name: "reply", model: "llama3"}
 ```
