@@ -2,19 +2,13 @@ from copy import deepcopy
 from .filter import inverted_filter, filter
 from glob import glob
 from hashlib import md5
-from pydantic import BaseModel
 from signal import SIGINT
 from typing import Literal
 import argparse
-import json
 from openai import OpenAI
 import os
-import random # for random.choice
 import re
 import sys
-from datetime import datetime # for the 'HH:MM' special insertkey
-from typing import Literal
-from pydantic import BaseModel
 
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import FormattedText
@@ -41,22 +35,17 @@ def main(): # cli entry point
     args.model = args.model[0]
 
     client = OpenAI(base_url=args.api_url, api_key=args.api_key)
-    class ValidResponse(BaseModel):
-        # Literal wants a tuple not a list.
-        text: Literal[args.text]
 
-    schema = json.dumps(ValidResponse.model_json_schema())
-    prompt = f"Respond only with the following JSON object and nothing else:\n\n{json.dumps({'text':args.text})}"
+    prompt = f"Respond only with the following text and nothing else:\n\n<start>{args.text}<end>\n\nDo not include <start> and <end>."
 
     response =  client.chat.completions.create(
         messages=[{'role': 'user', 'content': prompt}],
         model=args.model,
         stream=True,
-        response_format={'type':'json_schema', 'json_schema':schema},
     )
 
 
-    colors = ('green', 'yellow','cyan', 'red',)
+    colors = ('yellow','cyan',)
     raw = ''
     for i,comp in enumerate(response):
 
@@ -64,15 +53,15 @@ def main(): # cli entry point
         delta = chunk.delta.content
         if not delta is None:
             color = colors[i % len(colors)]
-            print_formatted_text(FormattedText([(color, delta)]), end='')
+            shown_delta = delta.replace('\n', '\\n')
+            print_formatted_text(FormattedText([(f"bg:{color} fg:black", shown_delta)]), end='')
             raw += delta
 
-    returned = ValidResponse.model_validate_json(raw).text
 
+    print()
+    returned = raw.strip()
     if not args.text == returned:
         print("\nWarning: Input text was not reproduced exactly!")
 
 if __name__ == '__main__':
     main()
-
-
