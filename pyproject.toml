@@ -24,6 +24,7 @@ Repository = "https://github.com/tillfalko/interpolation-engine"
 
 [project.scripts]
 interpolation-engine = "interpolation_engine.interpolation_engine:main"
+show-tokenization = "interpolation_engine.show_tokens:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
