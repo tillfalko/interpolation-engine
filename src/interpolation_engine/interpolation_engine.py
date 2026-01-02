@@ -565,12 +565,12 @@ async def chat(
             schema = json.dumps(Choice.model_json_schema())
             schema_prompt = f"Respond only with a valid JSON object conforming to this schema: {schema}. Do not add any additional text."
 
-            updated_messages = messages + [{'role': 'system', 'content': schema_prompt}]
+            updated_messages = messages + [{'role': 'user', 'content': schema_prompt}]
 
             response =  await client.chat.completions.create(
                 messages=updated_messages,
                 stream=True,
-                format='json',
+                response_format={'type':'json_schema', 'json_schema':schema},
                 extra_body=extra_body,
                 **completion_args)
 
