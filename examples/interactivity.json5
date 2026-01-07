@@ -1,0 +1,22 @@
+{
+    default_state: {
+        order_index : 1,
+        inserts: {
+        },
+    },
+    order: [
+        {cmd:'user_input', prompt:'Hey! What\'s your name?\n> ', output_name:'name'},
+        {cmd:'user_choice', description:'What time is it?', list:['Morning', 'Noon', 'Evening', 'Night'], output_name:'time'},
+        {cmd:'replace_map', item:'{time}', wildcard_maps:[
+            {'Morning' : 'Well, I wish you a good morning, {name}.'},
+            {'Noon'    : 'Well, {name}, I hope you have a great day.'},
+            {'Evening' : 'Nice to meet you, {name}. I hope today was a good day for you.'},
+            {'Night'   : 'Good night!'},
+        ], output_name:'greeting'},
+        {cmd:'print', text:'{greeting}'},
+    ],
+    tasks:{
+    },
+    save_states : {
+    },
+}
