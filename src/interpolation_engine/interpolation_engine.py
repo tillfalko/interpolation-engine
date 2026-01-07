@@ -989,7 +989,7 @@ def validate_program(program):
             
         match task:
 
-            case {'cmd':'join_list', 'list': _, 'before': _, 'between': _, 'after': _, 'output_name': _}:
+            case {'cmd':'list_join', 'list': _, 'before': _, 'between': _, 'after': _, 'output_name': _}:
                 assert_types('list', [list])
                 assert_types('before', [str])
                 assert_types('between', [str])
@@ -1213,7 +1213,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
 
     match task:
 
-        case {'cmd':'join_list', 'list': _list, 'before': before, 'between': between, 'after': after, 'output_name': output_name}:
+        case {'cmd':'list_join', 'list': _list, 'before': before, 'between': between, 'after': after, 'output_name': output_name}:
             set_interpdata(inserts, output_name, before + between.join(_list) + after)
 
         case {'cmd':'list_concat', 'lists':lists, 'output_name': output_name}:
