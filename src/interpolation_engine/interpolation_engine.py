@@ -590,6 +590,9 @@ async def chat(
             outputs = [Choice.model_validate_json(raw).choice]
 
     except BaseException as e:
+        # properly cancel generation
+        await response.close()
+
         # Log Output even if interrupted.
         log_messages( messages + [{'role':'assistant','content':raw}] )
 
