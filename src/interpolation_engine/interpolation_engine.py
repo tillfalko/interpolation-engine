@@ -525,6 +525,7 @@ async def chat(
         file=log_sink,
     )
 
+    response = None
     try:
 
         if choices_list == None:
@@ -590,8 +591,9 @@ async def chat(
             outputs = [Choice.model_validate_json(raw).choice]
 
     except BaseException as e:
-        # properly cancel generation
-        await response.close()
+        if response:
+            # properly cancel generation
+            await response.close()
 
         # Log Output even if interrupted.
         log_messages( messages + [{'role':'assistant','content':raw}] )
