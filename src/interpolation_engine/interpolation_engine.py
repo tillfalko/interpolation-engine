@@ -1710,12 +1710,15 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
             case "Reload and Restart":
 
                 _program, _state = load(filepath)
+                program_args = {k:v for k,v in state['inserts'].items() if k[:3] == 'ARG' and k[3:].isnumeric()}
 
                 # Edit the program and state dicts in place.
                 program.clear()
                 program.update(deepcopy(_program))
                 state.clear()
                 state.update(deepcopy(_state))
+                state['inserts'].update(program_args)
+
                 completion_args.clear()
                 completion_args.update(deepcopy(program.get('completion_args', {})))
                 named_tasks.clear()
