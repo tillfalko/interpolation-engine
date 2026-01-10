@@ -44,12 +44,12 @@ incrementing the `order_index`.
 
 The order of executed tasks is affected by `goto`, `goto_map`. The tasks `serial`, `parallel_wait` and `parallel_race` execute sub-tasks (see below).
 
-Tasks are usually defined directly in the `program['order']`, but you can also define named tasks in  `program['tasks']`.
+Tasks are usually defined directly in the `program['order']`, but you can also define named tasks in  `program['named_tasks']`.
 There their key is a name by which they can be executed like `{cmd:'run_task', task_name:'print_current_status'}`.
 
 Using `serial`, a named task can be arbitrarily complex which is the closest thing Interpolation Engine has to factoring code into a function.
 
-`program['order']` and  `program['tasks']` are static. The complete runtime information is contained in it's so called `state`. `default_state` is simply the state that gets loaded when Interpolation Engine executes a program from the beginning. You can save and load the current state using the main menu.
+`program['order']` and  `program['named_tasks']` are static. The complete runtime information is contained in it's so called `state`. `default_state` is simply the state that gets loaded when Interpolation Engine executes a program from the beginning. You can save and load the current state using the main menu.
 
 
 #### Interpolaton

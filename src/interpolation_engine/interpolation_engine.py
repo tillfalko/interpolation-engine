@@ -783,7 +783,7 @@ def validate_program(program):
     assert 'default_state' in program, f"Key 'state' not in program. Does it follow the new format?"
     assert 'save_states' in program and type(program['save_states']) == dict
     #assert 'output' in program['default_state'] and type(program['default_state']['output']) == str, f"default_task needs 'output' str, only has keys {program.keys()}"
-    assert 'tasks' in program and type(program['tasks']) == dict, f"program needs 'tasks' object for named tasks"
+    assert 'named_tasks' in program and type(program['named_tasks']) == dict, f"program needs 'named_tasks' object for named tasks"
     assert 'inserts' in program['default_state'] and type(program['default_state']['inserts']) == dict
 
     # It is not possible to know beforehand what content inserts will have
@@ -802,7 +802,7 @@ def validate_program(program):
                 filename = filename[:-len('.json5')]
             insert_keys.append(filename)
         all_insertkeys_ever_available |= set(insert_keys)
-    tasks_to_check = program['order'].copy() + list(program['tasks'].values())
+    tasks_to_check = program['order'].copy() + list(program['named_tasks'].values())
     for i,task in enumerate(tasks_to_check):
         assert 'line' in task, f"This task does not have a 'line' key: {task}"
         task['traceback_label'] = f"{task['cmd']}-{task['line']}"
@@ -1035,7 +1035,7 @@ def validate_program(program):
 
             case {'cmd':'run_task', 'task_name':task_name, **extra_args}:
                 assert_types('task_name', [str])
-                assert task_name in program['tasks'], f"{task['traceback_label']}: Task '{task_name}' is used at but never defined."
+                assert task_name in program['named_tasks'], f"{task['traceback_label']}: Task '{task_name}' is used at but never defined."
 
             case {'cmd':'parallel_race', 'tasks':_}:
                 assert_types('tasks', [list])
@@ -1722,7 +1722,7 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
                 completion_args.clear()
                 completion_args.update(deepcopy(program.get('completion_args', {})))
                 named_tasks.clear()
-                named_tasks.update(deepcopy(program.get('tasks',{})))
+                named_tasks.update(deepcopy(program.get('named_tasks',{})))
                 await InputOutputManager().write('\n'*os.get_terminal_size().lines) # clear text
                 status = f"\nRestarted Program after reloading.\n"
                 print(f"🛈 Restarted Program.", file=log_sink)
@@ -1961,7 +1961,7 @@ async def async_main(filepath, args):
             .replace(insert_stop, escape+insert_stop))
 
     completion_args = program.get('completion_args', {})
-    named_tasks = program.get('tasks', {})
+    named_tasks = program.get('named_tasks', {})
 
     if len(program['order']) > 0:
 

@@ -15,7 +15,7 @@
         ], output_name:'greeting'},
         {cmd:'print', text:'{greeting}'},
     ],
-    tasks:{
+    named_tasks:{
     },
     save_states : {
     },

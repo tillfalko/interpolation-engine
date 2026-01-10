@@ -7,7 +7,7 @@
     order: [
         {cmd:'print', text:'Hello, world!'},
     ],
-    tasks:{
+    named_tasks:{
     },
     save_states : {
     },
