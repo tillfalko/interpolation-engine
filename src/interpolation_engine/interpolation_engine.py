@@ -516,6 +516,10 @@ async def chat(
         last_api_key = api_key
 
 
+    # will be shown should generation run out of context length.
+    async def out_of_context_message():
+        log_string('Ran out of context length, generation stopped short.', title='WARNING')
+        await InputOutputManager().select_index([], 'Generation exceeded context length! Instead of crashing, this message is being shown so that you can save and try to increase your context length before loading. Loading this save will restart the generation.')
 
 
     raw = ""
@@ -526,6 +530,7 @@ async def chat(
     )
 
     response = None
+    ran_out_of_context = False
     try:
 
         if choices_list == None:
@@ -547,15 +552,17 @@ async def chat(
                 # ChatCompletionChunk(id='chatcmpl-Ymca30RQi7uVQdcYJeIt4uIIQGmfVhRX', choices=[Choice(delta=ChoiceDelta(content=None, function_call=None, refusal=None, role=None, tool_calls=None), finish_reason='stop', index=0, logprobs=None)], created=1765671497, model='...', object='chat.completion.chunk', service_tier=None, system_fingerprint='b7342-2fbe3b7', usage=None, timings={'cache_n': 49, 'prompt_n': 1, 'prompt_ms': 0.571, 'prompt_per_token_ms': 0.571, 'prompt_per_second': 1751.3134851138354, 'predicted_n': 14, 'predicted_ms': 958.716, 'predicted_per_token_ms': 68.47971428571428, 'predicted_per_second': 14.602864664822532})
 
                 chunk = comp.choices[0]
+                if chunk.finish_reason=='length':
+                    ran_out_of_context = True
                 delta = chunk.delta.content
                 if not delta is None:
                     raw += delta
-
                     fragment = extract_outputs(delta)
                     if shown:
                         visual_fragment = hide_filter(fragment)
                         await InputOutputManager().write(visual_fragment)
                         visual_output += visual_fragment
+            
 
         elif choices_list:
 
@@ -576,9 +583,9 @@ async def chat(
                 **completion_args)
 
             async for comp in response:
-
-
                 chunk = comp.choices[0]
+                if chunk.finish_reason=='length':
+                    ran_out_of_context = True
                 delta = chunk.delta.content
                 if not delta is None:
                     raw += delta
@@ -591,6 +598,7 @@ async def chat(
             outputs = [Choice.model_validate_json(raw).choice]
 
     except BaseException as e:
+        
         if response:
             # properly cancel generation
             await response.close()
@@ -598,13 +606,22 @@ async def chat(
         # Log Output even if interrupted.
         log_messages( messages + [{'role':'assistant','content':raw}] )
 
+        if 'exceeds the available context size' in str(e) or 'Context size has been exceeded' in str(e):
+            await out_of_context_message()
+
         raise e
+
+    if ran_out_of_context:
+        await out_of_context_message()
+
 
     if shown:
         await InputOutputManager().write('\n')
         visual_output += '\n'
 
     log_messages( messages + [{'role':'assistant','content':raw}] )
+
+
 
     return [o.strip() for o in outputs], visual_output
 
@@ -1388,6 +1405,9 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             set_interpdata(inserts, output_name, item)
 
         case {'cmd':'print', 'text':text}:
+            # Remove escaping for insert start and insert stop for printing.
+            # Otherwise it would not be possible to print the text '{notaninsert}'.
+            text = text.replace(escape+insert_start,insert_start).replace(escape+insert_stop,insert_stop)
             text = str(text) # may be an int or list
             state['output'] += text
             await InputOutputManager().write(text)
