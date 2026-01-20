@@ -349,10 +349,10 @@ def get_interpdata(inserts, insertkey: str):
                 try:
                     try:
                         with open(os.path.join(inserts_dir, f"{insertkey}.json5")) as f:
-                            return json5.loads(f.read())
+                            return recursive_escape(json5.loads(f.read()))
                     except FileNotFoundError:
                         with open(os.path.join(inserts_dir, insertkey)) as f:
-                            return f.read().strip()
+                            return recursive_escape(f.read().strip())
                 except FileNotFoundError:
                     pass
             missing_detail = " in interpdata"
@@ -1192,6 +1192,32 @@ def validate_program(program):
 def task_preview(task):
     return ", ".join([f"{k}={str_preview(v)}" for k,v in task.items() if k not in ('traceback_label',)])
 
+def recursive_unescape(x):
+    if type(x) == str:
+        return (x
+            .replace(escape+insert_start, insert_start)
+            .replace(escape+insert_stop, insert_stop))
+
+    elif type(x) == list:
+        return [recursive_unescape(xx) for xx in x]
+    elif type(x) == dict:
+        return {recursive_unescape(xk):recursive_unescape(xv) for xk,xv in x.items()}
+    else:
+        return x
+
+def recursive_escape(x):
+    if type(x) == str:
+        return (x
+            .replace(insert_start, escape+insert_start)
+            .replace(insert_stop, escape+insert_stop))
+
+    elif type(x) == list:
+        return [recursive_escape(xx) for xx in x]
+    elif type(x) == dict:
+        return {recursive_escape(xk):recursive_escape(xv) for xk,xv in x.items()}
+    else:
+        return x
+
 def recursive_interpolate(inserts, x):
     if get_simple_insertkey(x):
         return recursive_interpolate(inserts, interpolate_inserts(inserts, x))
@@ -1387,18 +1413,6 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
 
             # works just like 'set' but also unescapes strings.
 
-            def recursive_unescape(x):
-                if type(x) == str:
-                    return (x
-                        .replace(escape+insert_start, insert_start)
-                        .replace(escape+insert_stop, insert_stop))
-
-                elif type(x) == list:
-                    return [recursive_unescape(xx) for xx in x]
-                elif type(x) == dict:
-                    return {recursive_unescape(xk):recursive_unescape(xv) for xk,xv in x.items()}
-                else:
-                    return x
 
             item = recursive_unescape(item)
             item = recursive_interpolate(inserts, item)
