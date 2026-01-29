@@ -4,7 +4,6 @@ from glob import glob
 from hashlib import md5
 from pydantic import BaseModel
 from signal import SIGINT
-from typing import Literal
 import argparse
 import asyncio # for parallel generation
 import json # used only for dumping pydantic schema in structured generation
@@ -16,7 +15,6 @@ import re
 import sys
 from datetime import datetime # for the 'HH:MM' special insertkey
 from typing import Literal
-from pydantic import BaseModel
 
 from prompt_toolkit import PromptSession, print_formatted_text, prompt # prompt function is used instead of `input` the user enters text.
 from prompt_toolkit.application import Application
@@ -42,8 +40,11 @@ insert_start='{'
 insert_stop='}'
 escape = '\\' # Use this to escape '{' and '}'.
 inserts_dir = None
+AGENT_OUTPUT_PATH = "/tmp/agent_output"
+AGENT_INPUT_PATH = "/tmp/agent_input"
 
 class InputOutputManager:
+    agent_mode = False
     _instance = None
 
     def __new__(cls):
@@ -53,6 +54,23 @@ class InputOutputManager:
         return cls._instance
 
     def _init_once(self):
+        self.agent_mode = self.__class__.agent_mode
+        if self.agent_mode:
+            self.prompt_history = InMemoryHistory()
+            self.show_prompt = False
+            self.show_input_info = False
+            self.prompt_text = ''
+            self.output_buffer = None
+            self.output_text = ''
+            self.output = None
+            self.input_info = None
+            self.prompt = None
+            self.kb = None
+            self.app = None
+            self._input_future = None
+            self._input_lock = asyncio.Lock()
+            self._app_task = None
+            return
 
         global prompt_history_path
         self.prompt_history = FileHistory(prompt_history_path) if prompt_history_path else InMemoryHistory()
@@ -136,17 +154,24 @@ class InputOutputManager:
 
     async def start(self):
         """Start the prompt_toolkit app in the background."""
+        if self.agent_mode:
+            return
         if self._app_task is None:
             self._app_task = asyncio.create_task(self.app.run_async())
 
 
     async def stop(self):
         """Exit the UI."""
+        if self.agent_mode:
+            return
         if self._app_task and not self._app_task.done():
             self.app.exit()
             await self._app_task
 
     async def clear(self):
+        if self.agent_mode:
+            self.output_text = ''
+            return
         self.output_buffer.reset()
         # self.output is only as big as it needs to be. When empty, the input_info is at the top
         # of the screen instead of the bottom. To prevent this, always have some empty lines.
@@ -155,6 +180,9 @@ class InputOutputManager:
         self.app.invalidate()
 
     async def write(self, text: str):
+        if self.agent_mode:
+            self.output_text += text
+            return
         ri = self.output.render_info
         if ri is None: # ri is None when you try to write before InputOutputManager.start()
             new_text = self.output_buffer.text + text
@@ -196,6 +224,29 @@ class InputOutputManager:
         - Supports Shift+Enter to insert newlines.
         - Enter submits.
         """
+        if self.agent_mode:
+            try:
+                os.remove(AGENT_INPUT_PATH)
+            except FileNotFoundError:
+                pass
+            payload = {
+                "type": "user_input",
+                "output": self.output_text,
+                "prompt": prompt,
+            }
+            with open(AGENT_OUTPUT_PATH, "w") as f:
+                f.write(json.dumps(payload, ensure_ascii=True, indent=2))
+            while True:
+                if os.path.exists(AGENT_INPUT_PATH):
+                    with open(AGENT_INPUT_PATH, "r") as f:
+                        data = f.read()
+                    try:
+                        os.remove(AGENT_INPUT_PATH)
+                    except FileNotFoundError:
+                        pass
+                    return data.rstrip('\n')
+                await asyncio.sleep(0.1)
+
         if '\n' in prompt:
             outline_prompt, inline_prompt = prompt.rsplit('\n', maxsplit=1)
         else:
@@ -251,6 +302,42 @@ class InputOutputManager:
         Present a list of options inside the input area and wait for a keypress selection.
         #The input area's height dynamically adjusts to fit all options, accounting for wrapping.
         """
+        if self.agent_mode:
+            if len(options) <= 9:
+                keys = [str(i) for i in range(1, len(options) + 1)]
+            else:
+                keys = [chr(ord('a') + i) for i in range(len(options))]
+            choice_map = {k: i for i, k in enumerate(keys)}
+            payload = {
+                "type": "user_choice",
+                "output": self.output_text,
+                "prompt": description,
+                "choices": {k: options[i] for k, i in choice_map.items()},
+            }
+            try:
+                os.remove(AGENT_INPUT_PATH)
+            except FileNotFoundError:
+                pass
+            with open(AGENT_OUTPUT_PATH, "w") as f:
+                f.write(json.dumps(payload, ensure_ascii=True, indent=2))
+            while True:
+                if os.path.exists(AGENT_INPUT_PATH):
+                    with open(AGENT_INPUT_PATH, "r") as f:
+                        raw = f.read()
+                    try:
+                        os.remove(AGENT_INPUT_PATH)
+                    except FileNotFoundError:
+                        pass
+                    text = raw.strip()
+                    if text in choice_map:
+                        return choice_map[text]
+                    if text in options:
+                        return options.index(text)
+                    raise Exception(
+                        f"Invalid agent choice '{raw}'. Expected one of: {', '.join(choice_map.keys())}."
+                    )
+                await asyncio.sleep(0.1)
+
         all_keys = ('1','2','3','4','5','6','7','8','9','9','a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z')
 
         if len(options) > len(all_keys):
@@ -1050,6 +1137,13 @@ def validate_program(program):
                 assert_types('prompt', [str])
                 assert_types('output_name', [str])
 
+            case {'cmd':'await_insert', 'name': _}:
+                assert_types('name', [str])
+                if not get_simple_insertkey(task['name']):
+                    assert is_possible_key(task['name']), (
+                        f"{task['traceback_label']}: await_insert name '{task['name']}' will never be defined."
+                    )
+
             case {'cmd':'run_task', 'task_name':task_name, **extra_args}:
                 assert_types('task_name', [str])
                 assert task_name in program['named_tasks'], f"{task['traceback_label']}: Task '{task_name}' is used at but never defined."
@@ -1289,7 +1383,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                 elif type(index) == int and index < 0:
                     return len(_list) + index
                 else:
-                    raise Exception(f"Program lists cannot be indexed with '{index}'.")
+                    raise Exception(f"Program lists cannot be indexed with '{index}'. Programs are 1-indexed.")
 
             set_interpdata(inserts, output_name, _list[py_index(index)])
 
@@ -1299,31 +1393,38 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             to_index = eval_math(inserts, to_index) if type(to_index) == str else to_index
 
             # Unlike python, order indexing is 1-based.
-            def py_index(index):
+            def py_index(index, right=False):
                 index = int(index) if type(index) == str else index
                 if type(index) == int and index > 0:
                     return index-1
                 elif type(index) == int and index < 0:
                     return len(_list) + index
-                else:
+                elif type(index) == int and right and index == 0:
+                    return 0
+                elif type(index) == int  and index == 0:
+                    raise Exception(f"Lower index of slice cannot be 0. Programs are 1-indexed.")
+                elif type(index) == int and index < 0:
                     raise Exception(f"Program lists cannot be indexed with '{index}'.")
 
-            set_interpdata(inserts, output_name, _list[py_index(from_index):py_index(to_index)+1])
+            set_interpdata(inserts, output_name, _list[py_index(from_index):py_index(to_index, right=True)+1])
 
         case {'cmd':'user_choice', 'list': _list, 'output_name': output_name, 'description':description}:
-
-            choice = _list[await InputOutputManager().select_index(_list, description = description)]
+            choice_index = await InputOutputManager().select_index(_list, description = description)
+            choice = _list[choice_index]
             print(f"🛈  User selected {str_preview(choice)}.", file=log_sink)
             set_interpdata(inserts, output_name, choice)
 
         case {'cmd':'user_input', 'prompt':inputtext, 'output_name': output_name}:
-
             userinput = await InputOutputManager().user_input(prompt=inputtext)
             userinput = (userinput
                 .replace(insert_start, escape+insert_start)
                 .replace(insert_stop, escape+insert_stop))
             print(f"🛈  User entered {str_preview(userinput)}.", file=log_sink)
             set_interpdata(inserts, output_name, userinput)
+
+        case {'cmd':'await_insert', 'name':name}:
+            while name not in inserts:
+                await asyncio.sleep(0.05)
 
         case {'cmd':'run_task', 'task_name':task_name, **extra_args}:
     
@@ -1998,10 +2099,8 @@ async def async_main(filepath, args):
     named_tasks = program.get('named_tasks', {})
 
     if len(program['order']) > 0:
-
         await InputOutputManager().start()
         await asyncio.sleep(0)
-
         await InputOutputManager().write(state.get('output',''))
 
     while state['order_index'] <= len(program['order']): # order_index is 1-based.
@@ -2043,7 +2142,7 @@ async def async_main(filepath, args):
         print(f"🛈 Reached end of order list.", file=log_sink)
 
     # IOM only gets started if at least one task exists.
-    if len(program['order']) > 0: 
+    if len(program['order']) > 0:
         await InputOutputManager().stop()
 
     print(state['output'].strip())
@@ -2073,11 +2172,18 @@ def main(): # cli entry point
         dest="inserts_dir",
         help="Optional directory to load inserts from when a key is not found in state['inserts'].",
     )
+    parser.add_argument(
+        "--agent-mode",
+        dest="agent_mode",
+        action="store_true",
+        help="Wait for user_input/user_choice via /tmp/agent_input and write context to /tmp/agent_output.",
+    )
     args = parser.parse_args()
 
     global log_sink, prompt_history_path
     log_sink = open(args.log_path, "a") if args.log_path else open(os.devnull, 'w')
     prompt_history_path = args.prompt_history if args.prompt_history else None
+    InputOutputManager.agent_mode = args.agent_mode
 
     if not args.program:
         print("Error: specify a program (.json5 file) to run.")

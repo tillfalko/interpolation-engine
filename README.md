@@ -16,6 +16,12 @@ Press `escape` at any time to toggle the main menu. Opening the menu stops progr
 Hold shift to select text.
 When prompted for text input you can press ctrl-n to enter linebreaks.
 
+Agent mode (for automated testing) waits for `user_input`/`user_choice` via files:
+```
+interpolation_engine --agent-mode examples/text_adventure.json5
+```
+When a prompt is reached, `/tmp/agent_output` is written as JSON with fields `type`, `output`, and (if applicable) `prompt`/`choices`. For `user_choice`, `choices` is an object whose keys are valid inputs (e.g. `"1"`, `"2"` or `"a"`, `"b"`), and values are the option strings. Write the selected key (or exact option text) to `/tmp/agent_input` to resume.
+
 ## Writing Programs
 
 #### General Architecture
@@ -229,6 +235,14 @@ Presents a list to the user and stores the chosen item.<br>
 Example:<br>
 ```json5
 {cmd: "user_choice", list: ["small", "large"], description: "Size", output_name: "size"}
+```
+
+#### `await_insert`
+Fields: `name`<br>
+Blocks until an insert with the given name exists.<br>
+Example:<br>
+```json5
+{cmd: "await_insert", name: "user_input"}
 ```
 
 #### `label`
