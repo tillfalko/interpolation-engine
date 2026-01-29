@@ -1836,7 +1836,7 @@ async def main_menu(program, state, completion_args, named_tasks, filepath):
                     status = f"\nCannot load empty slot.\n"
                     continue # Go back to main menu.
                 state.clear()
-                state.update(slot_states[choice_i])
+                state.update(deepcopy(slot_states[choice_i]))
                 state['output'] = state.get('output','') # HACK
                 await InputOutputManager().write(state['output'])
                 status = f"\nLoaded '{state['label']}' from slot {choice_i+1}.\n"
