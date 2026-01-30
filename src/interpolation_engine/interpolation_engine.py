@@ -702,10 +702,6 @@ async def chat(
         await out_of_context_message()
 
 
-    if shown:
-        await InputOutputManager().write('\n')
-        visual_output += '\n'
-
     log_messages( messages + [{'role':'assistant','content':raw}] )
 
 
