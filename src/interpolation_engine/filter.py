@@ -25,7 +25,7 @@ def filter(start_str, stop_str, enumerate_outputs = False):
             if mode_is_shown[0]:
                 outputs.append('')
                 if enumerate_outputs:
-                    enumeration = f"\n\n{len(outputs)}. "
+                    enumeration = "\n\n"*(len(outputs) > 1) + f"{len(outputs)}. "
 
         for safebelow in range(len(buffer[0])):
             if next_str.startswith(buffer[0][safebelow:safebelow+len(next_str)]) and next_str != '':
@@ -92,12 +92,13 @@ def inverted_filter(start_str, stop_str, perdelta = lambda s: print(s, end='')):
 if __name__ == "__main__":
     # TODO: remove or put this in tests
     from time import sleep
-    sample = "0<secret>1</secret>2<secret>3</secret>4"
+    #sample = "0<secret>1</secret>2<secret>3</secret>4"
+    sample = "<output>1</output>\n\n\t<output>and 2</output>"
     #sample = "<secret>Hey how</secret>falskfjasldfkj<secret> are you?</secret>"
     #inv_f = inverted_filter("<secret>","</secret>")
     #inv_f = inverted_filter("","")
     #f,outputs = filter("<secret>","</secret>", enumerate_outputs=True)
-    f,outputs = filter("","", enumerate_outputs=True)
+    f,outputs = filter("<output>","</output>", enumerate_outputs=True)
     chunk_width = 3
     for i in range(0, len(sample), chunk_width):
         chunk = sample[i:i+chunk_width]
