@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from signal import SIGINT
 import argparse
 import asyncio # for parallel generation
+import atexit
 import json # used only for dumping pydantic schema in structured generation
 import json5
 from openai import AsyncOpenAI
@@ -13,6 +14,8 @@ import os
 import random # for random.choice
 import re
 import sys
+import subprocess
+import shutil
 from datetime import datetime # for the 'HH:MM' special insertkey
 from typing import Literal
 
@@ -552,6 +555,35 @@ def get_wildcard_matches(wildcard_s, s):
 
 # caching
 client = last_api_url = last_api_key = None
+current_tts = {'piper': None, 'pw_play': None}
+
+def stop_current_tts():
+    piper = current_tts['piper']
+    pw_play = current_tts['pw_play']
+    if piper and piper.stdin:
+        try:
+            piper.stdin.close()
+        except Exception:
+            pass
+    if piper:
+        piper.terminate()
+        try:
+            piper.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            piper.kill()
+            piper.wait()
+    if pw_play:
+        pw_play.terminate()
+        try:
+            pw_play.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pw_play.kill()
+            pw_play.wait()
+    current_tts['piper'] = None
+    current_tts['pw_play'] = None
+
+atexit.register(stop_current_tts)
+
 
 async def chat(
         messages,
@@ -563,6 +595,8 @@ async def chat(
         n_outputs,
         shown,
         choices_list,
+        voice_path,
+        voice_speaker,
         api_url,
         api_key,
         extra_body,
@@ -582,6 +616,8 @@ async def chat(
             n_outputs (int) : The amount of outputs expected. Can be -1 to be unlimited.
             shown (bool) : Whether to print what is being generated to stdout.
             choices_list (list[str]) : A list of choices that the model will be restricted to pick from.
+            voice_path (str) : Optional path to a Piper voice (.onnx) to read the output as it's generated.
+            voice_speaker (int) : Optional speaker id for multi-speaker Piper models.
     Returns:
         if n_outputs == 1:
             output (str) : The generated output with start_str and stop_str removed.
@@ -616,6 +652,76 @@ async def chat(
         file=log_sink,
     )
 
+    piper = None
+    pw_play = None
+    tts_enabled = bool(voice_path)
+    if tts_enabled:
+        if current_tts['piper'] or current_tts['pw_play']:
+            stop_current_tts()
+        if not shutil.which("piper"):
+            raise SystemExit("voice_path was set but 'piper' was not found on PATH.")
+        if not shutil.which("pw-play"):
+            raise SystemExit("voice_path was set but 'pw-play' was not found on PATH.")
+        voice_path = os.path.expanduser(voice_path)
+        if not os.path.isabs(voice_path):
+            voice_path = os.path.join(program_dir or os.getcwd(), voice_path)
+        if not os.path.exists(voice_path):
+            raise SystemExit(f"voice_path does not exist: {voice_path}")
+        if os.path.isdir(voice_path):
+            raise SystemExit(f"voice_path is a directory, expected a file: {voice_path}")
+        config_path = None
+        if voice_path.endswith(".onnx") and os.path.exists(voice_path + ".json"):
+            config_path = voice_path + ".json"
+        elif os.path.exists(voice_path + ".onnx.json"):
+            config_path = voice_path + ".onnx.json"
+
+        rate = 22050
+        channels = 1
+        if config_path:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                audio_cfg = cfg.get("audio") if isinstance(cfg.get("audio"), dict) else {}
+                rate = int(audio_cfg.get("sample_rate") or cfg.get("sample_rate") or rate)
+                channels = int(audio_cfg.get("channels") or cfg.get("channels") or channels)
+
+        piper_cmd = ["piper", "--model", voice_path, "--output-raw"]
+        if voice_speaker is not None:
+            piper_cmd += ["--speaker", str(voice_speaker)]
+        if config_path:
+            piper_cmd += ["--config", config_path]
+
+        piper = subprocess.Popen(
+            piper_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=sys.stderr,
+            text=False,
+        )
+        if piper.stdin is None or piper.stdout is None:
+            raise SystemExit("Failed to open Piper pipes")
+
+        pw_cmd = [
+            "pw-play",
+            "-a",
+            "--rate",
+            str(rate),
+            "--channels",
+            str(channels),
+            "--format",
+            "s16",
+            "-",
+        ]
+        pw_play = subprocess.Popen(
+            pw_cmd,
+            stdin=piper.stdout,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        piper.stdout.close()
+        current_tts['piper'] = piper
+        current_tts['pw_play'] = pw_play
+
     response = None
     ran_out_of_context = False
     try:
@@ -645,10 +751,16 @@ async def chat(
                 if not delta is None:
                     raw += delta
                     fragment = extract_outputs(delta)
+                    visual_fragment = hide_filter(fragment)
                     if shown:
-                        visual_fragment = hide_filter(fragment)
                         await InputOutputManager().write(visual_fragment)
                         visual_output += visual_fragment
+                    if piper and visual_fragment:
+                        try:
+                            piper.stdin.write(visual_fragment.encode("utf-8"))
+                            piper.stdin.flush()
+                        except BrokenPipeError:
+                            pass
             
 
         elif choices_list:
@@ -680,10 +792,20 @@ async def chat(
                     if shown:
                         await InputOutputManager().write(delta)
                         visual_output += delta
+                    if piper and delta:
+                        try:
+                            piper.stdin.write(delta.encode("utf-8"))
+                            piper.stdin.flush()
+                        except BrokenPipeError:
+                            pass
 
 
             outputs = [Choice.model_validate_json(raw).choice]
 
+    except asyncio.CancelledError:
+        if tts_enabled:
+            stop_tts()
+        raise
     except BaseException as e:
         
         if response:
@@ -696,11 +818,12 @@ async def chat(
         if 'exceeds the available context size' in str(e) or 'Context size has been exceeded' in str(e):
             await out_of_context_message()
 
+        if tts_enabled:
+            stop_current_tts()
         raise e
 
     if ran_out_of_context:
         await out_of_context_message()
-
 
     log_messages( messages + [{'role':'assistant','content':raw}] )
 
@@ -1248,6 +1371,16 @@ def validate_program(program):
             case {'cmd':'write', 'item': _, 'path': _}:
                 assert_types('path', [str])
 
+            case {'cmd':'speak', **args}:
+
+                arg_set = set(args)
+                required_args = {'text', 'voice_path'}
+                permitted_args = {'text', 'voice_path', 'voice_speaker', 'traceback_label', 'line'}
+                assert arg_set <= permitted_args, f"{task['traceback_label']}: speak has illegal arguments {arg_set - permitted_args}."
+                assert arg_set >= required_args, f"{task['traceback_label']}: speak is missing required arguments {required_args - arg_set}."
+                assert type(args['text']) == str
+                assert type(args['voice_path']) == str
+
             case {'cmd':'chat', **args}:
                 
                 arg_set = set(args) # Set only considers the keys of a dict.
@@ -1255,6 +1388,7 @@ def validate_program(program):
 
                 permitted_args = {
                     'messages', 'output_name', 'n_outputs', 'start_str', 'stop_str', 'hide_start_str', 'hide_stop_str', 'shown', 'choices_list_name', 'choices_list', 'traceback_label', 'line', 'model',
+                    'voice_path', 'voice_speaker',
                     # the rest are opanai api options https://platform.openai.com/docs/api-reference/chat/create
                     'extra_body', 'max_completion_tokens', 'temperature', 'seed', 'stop' 
                 }
@@ -1743,6 +1877,86 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                 f.write(content)
             print(f"🛈  write: '{resolved_path}' ({len(content)} bytes)", file=log_sink)
 
+        case {'cmd':'speak', 'text': text, 'voice_path': voice_path, **other_args}:
+            voice_path = os.path.expanduser(voice_path)
+            if not os.path.isabs(voice_path):
+                voice_path = os.path.join(program_dir or os.getcwd(), voice_path)
+            voice_speaker = other_args.get('voice_speaker', None)
+            if text == "":
+                stop_current_tts()
+                return
+            if not shutil.which("piper"):
+                raise SystemExit("voice_path was set but 'piper' was not found on PATH.")
+            if not shutil.which("pw-play"):
+                raise SystemExit("voice_path was set but 'pw-play' was not found on PATH.")
+            if not os.path.exists(voice_path):
+                raise SystemExit(f"voice_path does not exist: {voice_path}")
+            if os.path.isdir(voice_path):
+                raise SystemExit(f"voice_path is a directory, expected a file: {voice_path}")
+
+            stop_current_tts()
+
+            config_path = None
+            if voice_path.endswith(".onnx") and os.path.exists(voice_path + ".json"):
+                config_path = voice_path + ".json"
+            elif os.path.exists(voice_path + ".onnx.json"):
+                config_path = voice_path + ".onnx.json"
+
+            rate = 22050
+            channels = 1
+            if config_path:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if isinstance(cfg, dict):
+                    audio_cfg = cfg.get("audio") if isinstance(cfg.get("audio"), dict) else {}
+                    rate = int(audio_cfg.get("sample_rate") or cfg.get("sample_rate") or rate)
+                    channels = int(audio_cfg.get("channels") or cfg.get("channels") or channels)
+
+            piper_cmd = ["piper", "--model", voice_path, "--output-raw"]
+            if voice_speaker is not None:
+                piper_cmd += ["--speaker", str(voice_speaker)]
+            if config_path:
+                piper_cmd += ["--config", config_path]
+
+            piper = subprocess.Popen(
+                piper_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=sys.stderr,
+                text=False,
+            )
+            if piper.stdin is None or piper.stdout is None:
+                raise SystemExit("Failed to open Piper pipes")
+
+            pw_cmd = [
+                "pw-play",
+                "-a",
+                "--rate",
+                str(rate),
+                "--channels",
+                str(channels),
+                "--format",
+                "s16",
+                "-",
+            ]
+            pw_play = subprocess.Popen(
+                pw_cmd,
+                stdin=piper.stdout,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
+            piper.stdout.close()
+
+            try:
+                piper.stdin.write(text.encode("utf-8"))
+                piper.stdin.flush()
+                piper.stdin.close()
+            except BrokenPipeError:
+                pass
+
+            current_tts['piper'] = piper
+            current_tts['pw_play'] = pw_play
+
         case {'cmd':'chat', 'messages':messages, 'output_name': output_name, **other_args}:
 
             completion_args = deepcopy(completion_args)
@@ -1757,6 +1971,8 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             n_outputs             = completion_args.pop('n_outputs', 1)
             shown                 = completion_args.pop('shown', True)
             choices_list          = completion_args.pop('choices_list', None)
+            voice_path            = completion_args.pop('voice_path', None)
+            voice_speaker         = completion_args.pop('voice_speaker', None)
             extra_body            = completion_args.pop('extra_body', {})
             api_url               = completion_args.pop('api_url', 'http://localhost:8080') # default for llama.cpp 
             api_key               = completion_args.pop('api_key', 'unused') # required by openai even if not used
@@ -1789,6 +2005,8 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
                     n_outputs=n_outputs,
                     shown=shown,
                     choices_list=choices_list,
+                    voice_path=voice_path,
+                    voice_speaker=voice_speaker,
                     api_url=api_url,
                     api_key=api_key,
                     extra_body=extra_body
@@ -2157,6 +2375,7 @@ async def async_main(filepath, args):
 
         if killme:
             print(f"🛈 Terminated by user.", file=log_sink)
+            stop_current_tts()
             break
 
     else:
@@ -2166,6 +2385,7 @@ async def async_main(filepath, args):
     if len(program['order']) > 0:
         await InputOutputManager().stop()
 
+    stop_current_tts()
     print(state['output'].strip())
 
     return state
