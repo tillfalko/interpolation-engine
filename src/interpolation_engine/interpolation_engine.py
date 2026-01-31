@@ -26,6 +26,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea, Label, SearchToolbar
 from prompt_toolkit.data_structures import Point
@@ -145,6 +146,7 @@ class InputOutputManager:
             style=style,
             mouse_support=True,
             full_screen=True,
+            output=create_output(stdout=sys.stderr),
         )
         self.app.ttimeoutlen=0  # make 'escape' shortcut instant
 
@@ -183,6 +185,9 @@ class InputOutputManager:
         if self.agent_mode:
             self.output_text += text
             return
+        if not sys.stdout.isatty():
+            sys.stdout.write(text)
+            sys.stdout.flush()
         ri = self.output.render_info
         if ri is None: # ri is None when you try to write before InputOutputManager.start()
             new_text = self.output_buffer.text + text
