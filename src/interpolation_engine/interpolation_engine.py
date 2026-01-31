@@ -29,7 +29,6 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea, Label, SearchToolbar
 from prompt_toolkit.data_structures import Point
-from time import time # deleteme
 
 
 error_style = Style.from_dict({
@@ -40,6 +39,7 @@ insert_start='{'
 insert_stop='}'
 escape = '\\' # Use this to escape '{' and '}'.
 inserts_dir = None
+program_dir = None
 AGENT_OUTPUT_PATH = "/tmp/agent_output"
 AGENT_INPUT_PATH = "/tmp/agent_input"
 
@@ -1245,6 +1245,9 @@ def validate_program(program):
                 assert_types('output_name', [str])
                 assert math_input.count('(') == math_input.count(')'), f"{task['traceback_label']}: Illegal parentheses in \"{math_input}\"."
 
+            case {'cmd':'write', 'item': _, 'path': _}:
+                assert_types('path', [str])
+
             case {'cmd':'chat', **args}:
                 
                 arg_set = set(args) # Set only considers the keys of a dict.
@@ -1721,6 +1724,25 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             result_int = eval_math(inserts, math_input)
             set_interpdata(inserts, output_name, result_int)
 
+        case {'cmd':'write', 'item': item, 'path': path}:
+            path = os.path.expanduser(path)
+            resolved_path = path if os.path.isabs(path) else os.path.join(program_dir or os.getcwd(), path)
+            parent_dir = os.path.dirname(resolved_path) or '.'
+            if not os.path.isdir(parent_dir):
+                raise Exception(f"{task['traceback_label']}: write path '{resolved_path}' does not exist.")
+            if os.path.isdir(resolved_path):
+                raise Exception(f"{task['traceback_label']}: write path '{resolved_path}' is a directory.")
+            item = recursive_unescape(item)
+            if type(item) == str:
+                content = item
+            elif type(item) in (int, float, bool):
+                content = str(item)
+            else:
+                content = json5.dumps(item, ensure_ascii=True)
+            with open(resolved_path, 'w') as f:
+                f.write(content)
+            print(f"🛈  write: '{resolved_path}' ({len(content)} bytes)", file=log_sink)
+
         case {'cmd':'chat', 'messages':messages, 'output_name': output_name, **other_args}:
 
             completion_args = deepcopy(completion_args)
@@ -1752,6 +1774,7 @@ async def execute_task(state, task, completion_args, named_tasks, runtime_label 
             # https://github.com/abetlen/llama-cpp-python/issues/1907
             if 'max_completion_tokens' in completion_args:
                 completion_args['max_tokens'] = completion_args.pop('max_completion_tokens')
+
 
             while True:
                 # Output may be a list, but visual_output is always a str and it 
@@ -2080,6 +2103,8 @@ def save(program, state, filepath):
 
 async def async_main(filepath, args):
     assert filepath, "Specify a single program (.json5 file) to run and optionally pass arguments that the program will handle."
+    global program_dir
+    program_dir = os.path.dirname(os.path.abspath(filepath))
     filename = filepath.split('/')[-1].split('.json5')[0]
     program, state = load(filepath)
 

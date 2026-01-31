@@ -158,6 +158,14 @@ Example:<br>
 {cmd: "unescape", item: "Use \\{name\\}", output_name: "text"}
 ```
 
+#### `write`
+Fields: `item`, `path`<br>
+Writes `item` to a file after unescaping. Relative paths are resolved against the program file directory. The parent directory must already exist.<br>
+Example:<br>
+```json5
+{cmd: "write", item: "{foo}", path: "foo/bar/baz"}
+```
+
 #### `show_inserts`
 Shows the current `state.inserts`.<br>
 Example:<br>
