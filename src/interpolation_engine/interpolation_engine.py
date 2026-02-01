@@ -94,7 +94,7 @@ class InputOutputManager:
 
         self.input_info = TextArea(
             focusable=False,
-            wrap_lines=True,
+            wrap_lines=False,
             #height=Dimension(weight=9),
             #dont_extend_height=False,
             style="class:input-field",
@@ -128,7 +128,7 @@ class InputOutputManager:
             if t:
                 t.cancel()
 
-        @self.kb.add("escape", eager=True)
+        @self.kb.add("escape")
         def _(event):
             toggle_menu()
 
@@ -149,11 +149,34 @@ class InputOutputManager:
             mouse_support=True,
             full_screen=True,
         )
-        self.app.ttimeoutlen=0  # make 'escape' shortcut instant
+        self.app.timeoutlen = 0.01  # seconds; keep ESC responsive without breaking Alt sequences
+        self.app.ttimeoutlen = 0.01
 
         self._input_future = None
         self._input_lock = asyncio.Lock()
         self._app_task = None
+
+    def _manual_wrap_text(self, text: str, width: int, initial_offset: int = 0) -> str:
+        if width is None or width < 1:
+            return text
+        free_space = width - initial_offset
+        wrapped = []
+        for ch in text:
+            wrapped.append(ch)
+            if ch == '\n':
+                free_space = width
+                continue
+            free_space -= 1
+            if free_space < 1:
+                wrapped.append('\n')
+                free_space = width
+        return ''.join(wrapped)
+
+    def _set_input_info_text(self, text: str) -> None:
+        ri = self.output.render_info
+        width = ri.window_width if ri is not None else None
+        wrapped = self._manual_wrap_text(text, width) if width else text
+        self.input_info.buffer.text = wrapped
 
     async def start(self):
         """Start the prompt_toolkit app in the background."""
@@ -201,16 +224,7 @@ class InputOutputManager:
 
         # Use the end-of-buffer column for wrapping, not the cursor position.
         last_line = old_doc.text.rsplit('\n', 1)[-1]
-        free_space = ri.window_width -len(last_line) 
-        to_print = ''
-
-        while text != '':
-            to_print += text[0]
-            free_space = ri.window_width if text[0] == '\n' else free_space - 1
-            text = text[1:]
-
-            if free_space < 1:
-                text = '\n' + text
+        to_print = self._manual_wrap_text(text, ri.window_width, initial_offset=len(last_line))
 
         new_text = old_doc.text + to_print
         new_cursor = len(new_text) if follow_output else old_doc.cursor_position
@@ -261,7 +275,7 @@ class InputOutputManager:
             # Render the multi-line prompt *inside* the input field
             self.show_prompt = True
             self.show_input_info = outline_prompt != ''
-            self.input_info.buffer.text = outline_prompt
+            self._set_input_info_text(outline_prompt)
             self.prompt_text = inline_prompt
             self.prompt.buffer.insert_text(default)
             # Move cursor to the end
@@ -290,7 +304,7 @@ class InputOutputManager:
                 raise e
             finally:
                 # reset
-                self.input_info.buffer.text = ''
+                self._set_input_info_text('')
                 self.prompt_text = ''
                 self.prompt.buffer.reset()
                 self.show_prompt = False
@@ -355,7 +369,7 @@ class InputOutputManager:
                 option_lines.append(f"({all_keys[i]}) {option}")
 
             self.prompt.height=0
-            self.input_info.buffer.text = "\n".join([description]+option_lines if description else option_lines)
+            self._set_input_info_text("\n".join([description]+option_lines if description else option_lines))
             self.show_input_info = True
             self.app.invalidate()
 
@@ -383,7 +397,7 @@ class InputOutputManager:
                 for key in keys[:len(options)]:
                     self.kb.remove(key)
                 self.prompt.height = None
-                self.input_info.buffer.text = ''
+                self._set_input_info_text('')
                 self.prompt_text = ''
                 self.show_input_info = False
                 self.app.invalidate()
@@ -393,7 +407,7 @@ class InputOutputManager:
             for key in keys[:len(options)]:
                 self.kb.remove(key)
             self.prompt.height = None
-            self.input_info.buffer.text = ''
+            self._set_input_info_text('')
             self.prompt_text = ''
             self.show_input_info = False
             self.app.invalidate()
