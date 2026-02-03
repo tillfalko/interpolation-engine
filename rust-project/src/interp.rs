@@ -186,13 +186,23 @@ pub fn recursive_interpolate(
 ) -> Result<Value> {
     if let Value::String(s) = &value {
         if let Some(insertkey) = get_simple_insertkey(s) {
-            let inner = interpolate_inserts(inserts, &format!("{}{}{}", INSERT_START, insertkey, INSERT_STOP), ctx)?;
+            let inner = match interpolate_inserts(
+                inserts,
+                &format!("{}{}{}", INSERT_START, insertkey, INSERT_STOP),
+                ctx,
+            ) {
+                Ok(v) => v,
+                Err(_) => return Ok(Value::String(s.clone())),
+            };
             return Ok(inner);
         }
     }
 
     match value {
-        Value::String(s) => interpolate_inserts(inserts, &s, ctx),
+        Value::String(s) => match interpolate_inserts(inserts, &s, ctx) {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(Value::String(s)),
+        },
         Value::Array(arr) => Ok(Value::Array(
             arr.into_iter()
                 .map(|v| recursive_interpolate(inserts, v, ctx))

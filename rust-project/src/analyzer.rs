@@ -1,8 +1,8 @@
-use crate::interp::{extract_insert_keys, get_simple_insertkey};
+use crate::interp::extract_insert_keys;
 use crate::model::{Program, ProgramLoadContext, Task};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct Diagnostic {
@@ -15,6 +15,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
     let mut diags = Vec::new();
 
     let insert_keys = collect_possible_insert_keys(program, ctx);
+    let global_labels = collect_labels(program);
 
     let mut named = HashSet::new();
     for name in program.named_tasks.keys() {
@@ -26,6 +27,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
         "order",
         &named,
         &insert_keys,
+        &global_labels,
         &mut diags,
     );
 
@@ -35,6 +37,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
             &format!("named_tasks.{name}"),
             &named,
             &insert_keys,
+            &global_labels,
             &mut diags,
         );
     }
@@ -102,23 +105,11 @@ fn analyze_task_list(
     scope_name: &str,
     named_tasks: &HashSet<String>,
     insert_keys: &HashSet<String>,
+    global_labels: &HashSet<String>,
     diags: &mut Vec<Diagnostic>,
 ) {
-    let mut labels = HashSet::new();
     for task in tasks {
-        if let Some(cmd) = task.get("cmd").and_then(Value::as_str) {
-            if cmd == "label" {
-                if let Some(name) = task.get("name").and_then(Value::as_str) {
-                    if !labels.insert(name.to_string()) {
-                        diags.push(diag(task, format!("Duplicate label '{name}' in {scope_name}")));
-                    }
-                }
-            }
-        }
-    }
-
-    for task in tasks {
-        validate_task(task, scope_name, named_tasks, insert_keys, &labels, diags);
+        validate_task(task, scope_name, named_tasks, insert_keys, global_labels, diags);
         if let Some(subtasks) = task.get("tasks").and_then(Value::as_array) {
             let subtasks = subtasks
                 .iter()
@@ -130,6 +121,7 @@ fn analyze_task_list(
                     scope_name,
                     named_tasks,
                     insert_keys,
+                    global_labels,
                     diags,
                 );
             }
@@ -228,9 +220,25 @@ fn validate_task(
         _ => diags.push(diag(task, format!("Unknown cmd '{cmd}'"))),
     }
 
-    for value in task.values() {
+    for (k, value) in task.iter() {
+        if k == "tasks" {
+            continue;
+        }
+        if value
+            .as_array()
+            .is_some_and(|arr| arr.iter().all(|v| v.as_object().is_some()))
+        {
+            continue;
+        }
+        if value
+            .as_object()
+            .is_some_and(|obj| obj.get("cmd").and_then(Value::as_str).is_some())
+        {
+            continue;
+        }
         for key in extract_insert_keys(value) {
-            if !is_possible_insert(&key, insert_keys) && !key.starts_with("ARG") {
+            let is_numeric_capture = cmd == "replace_map" && key.chars().all(|c| c.is_ascii_digit());
+            if !is_possible_insert(&key, insert_keys) && !key.starts_with("ARG") && !is_numeric_capture {
                 diags.push(diag(
                     task,
                     format!("Interpolation key '{key}' will never be defined"),
@@ -263,7 +271,11 @@ fn wildcard_match(pattern: &str, s: &str) -> bool {
         }
     }
     regex.push('$');
-    regex::Regex::new(&regex).map(|re| re.is_match(s)).unwrap_or(false)
+    regex::RegexBuilder::new(&regex)
+        .dot_matches_new_line(true)
+        .build()
+        .map(|re| re.is_match(s))
+        .unwrap_or(false)
 }
 
 fn require_fields(task: &Task, fields: &[&str], diags: &mut Vec<Diagnostic>) {
@@ -290,4 +302,26 @@ fn super_task(value: &Value) -> Result<Task> {
         .as_object()
         .cloned()
         .ok_or_else(|| anyhow!("Not a task"))
+}
+
+fn collect_labels(program: &Program) -> HashSet<String> {
+    let mut labels = HashSet::new();
+    let mut stack = Vec::new();
+    stack.extend(program.order.iter().cloned());
+    stack.extend(program.named_tasks.values().cloned());
+    while let Some(task) = stack.pop() {
+        if task.get("cmd").and_then(Value::as_str) == Some("label") {
+            if let Some(name) = task.get("name").and_then(Value::as_str) {
+                labels.insert(name.to_string());
+            }
+        }
+        if let Some(tasks) = task.get("tasks").and_then(Value::as_array) {
+            for t in tasks {
+                if let Ok(subtask) = super_task(t) {
+                    stack.push(subtask);
+                }
+            }
+        }
+    }
+    labels
 }

@@ -250,6 +250,13 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
             respond_to,
             ..
         } => {
+            if options.is_empty() {
+                if let Some(tx) = respond_to.take() {
+                    let _ = tx.send(0);
+                }
+                state.mode = Mode::Idle;
+                return false;
+            }
             if let KeyCode::Char(c) = key.code {
                 let key_str = c.to_string();
                 if let Some(idx) = keys.iter().position(|k| k == &key_str) {

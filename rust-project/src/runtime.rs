@@ -253,6 +253,17 @@ enum TaskOutcome {
     Goto(String),
 }
 
+fn task_label(task: &Task, fallback_index: usize) -> String {
+    let cmd = task
+        .get("cmd")
+        .and_then(Value::as_str)
+        .unwrap_or("task");
+    match task.get("line").and_then(Value::as_i64) {
+        Some(line) => format!("{cmd}:{line}"),
+        None => format!("{cmd}:{fallback_index}"),
+    }
+}
+
 #[async_recursion(?Send)]
 async fn execute_task(
     state: Arc<Mutex<State>>,
@@ -350,14 +361,19 @@ async fn execute_task(
         "user_choice" => {
             let list = as_array(&task, "list")?;
             let description = as_string(&task, "description")?;
-            let options = list.iter().map(value_to_string).collect::<Vec<_>>();
-            let choice_index = io.select_index(options, Some(description)).await?;
-            let choice = list
-                .get(choice_index)
-                .ok_or_else(|| anyhow!("Choice index out of bounds"))?
-                .clone();
             let output_name = as_string(&task, "output_name")?;
-            with_inserts(state, |ins| set_interpdata(ins, &output_name, choice)).await;
+            if list.is_empty() {
+                let _ = io.select_index(Vec::new(), Some(description)).await?;
+                with_inserts(state, |ins| set_interpdata(ins, &output_name, Value::Null)).await;
+            } else {
+                let options = list.iter().map(value_to_string).collect::<Vec<_>>();
+                let choice_index = io.select_index(options, Some(description)).await?;
+                let choice = list
+                    .get(choice_index)
+                    .ok_or_else(|| anyhow!("Choice index out of bounds"))?
+                    .clone();
+                with_inserts(state, |ins| set_interpdata(ins, &output_name, choice)).await;
+            }
         }
         "user_input" => {
             let prompt = as_string(&task, "prompt")?;
@@ -403,7 +419,8 @@ async fn execute_task(
         }
         "parallel_wait" => {
             let tasks = as_task_array(&task, "tasks")?;
-            let futures = tasks.into_iter().map(|t| {
+            let futures = tasks.into_iter().enumerate().map(|(index, t)| {
+                let child_label = format!("{}/{}", runtime_label, task_label(&t, index + 1));
                 execute_task(
                     state.clone(),
                     t,
@@ -412,7 +429,7 @@ async fn execute_task(
                     ctx.clone(),
                     io.clone(),
                     token.child_token(),
-                    runtime_label.clone(),
+                    child_label,
                 )
             });
             let results = futures::future::join_all(futures).await;
@@ -424,7 +441,8 @@ async fn execute_task(
             let tasks = as_task_array(&task, "tasks")?;
             let group = token.child_token();
             let mut futures = FuturesUnordered::new();
-            for t in tasks {
+            for (index, t) in tasks.into_iter().enumerate() {
+                let child_label = format!("{}/{}", runtime_label, task_label(&t, index + 1));
                 futures.push(execute_task(
                     state.clone(),
                     t,
@@ -433,7 +451,7 @@ async fn execute_task(
                     ctx.clone(),
                     io.clone(),
                     group.child_token(),
-                    runtime_label.clone(),
+                    child_label,
                 ));
             }
             if let Some(res) = futures.next().await {
@@ -453,6 +471,8 @@ async fn execute_task(
                     return Err(anyhow!("cancelled"));
                 }
                 let subtask = tasks.get((sub_index - 1) as usize).cloned().unwrap();
+                let child_label =
+                    format!("{}/{}", runtime_label, task_label(&subtask, sub_index as usize));
                 let result = execute_task(
                     state.clone(),
                     subtask,
@@ -461,7 +481,7 @@ async fn execute_task(
                     ctx.clone(),
                     io.clone(),
                     token.child_token(),
-                    runtime_label.clone(),
+                    child_label,
                 )
                 .await?;
                 match result {
@@ -511,6 +531,11 @@ async fn execute_task(
                 let mut sub_index = state.lock().await.get_i64(&sub_index_label);
                 while sub_index <= tasks.len() as i64 {
                     let subtask = tasks.get((sub_index - 1) as usize).cloned().unwrap();
+                    let child_label = format!(
+                        "{}/{}",
+                        runtime_label,
+                        task_label(&subtask, sub_index as usize)
+                    );
                     let result = execute_task(
                         state.clone(),
                         subtask,
@@ -519,7 +544,7 @@ async fn execute_task(
                         ctx.clone(),
                         io.clone(),
                         token.child_token(),
-                        runtime_label.clone(),
+                        child_label,
                     )
                     .await?;
                     match result {
@@ -590,20 +615,45 @@ async fn execute_task(
                 .and_then(Value::as_array)
                 .ok_or_else(|| anyhow!("goto_map.target_maps must be array"))?;
 
+            let mut interp_error = false;
             let value_text = match interpolate_inserts(&inserts_snapshot, &value_text, &ctx) {
                 Ok(v) => value_to_string(&v),
-                Err(_) => "NULL".to_string(),
+                Err(_) => {
+                    interp_error = true;
+                    "NULL".to_string()
+                }
             };
 
             let mut target = None;
-            for entry in target_maps {
-                let obj = entry.as_object().ok_or_else(|| anyhow!("target_maps entry must be object"))?;
-                let (k, v) = obj.iter().next().ok_or_else(|| anyhow!("target_maps entry empty"))?;
-                let key = value_to_string(&interpolate_inserts(&inserts_snapshot, k, &ctx)?);
-                let val = value_to_string(&interpolate_inserts(&inserts_snapshot, v.as_str().unwrap_or(""), &ctx)?);
-                if wildcard_match(&key, &value_text) {
-                    target = Some(val);
-                    break;
+            if interp_error {
+                for entry in target_maps {
+                    let obj = entry.as_object().ok_or_else(|| anyhow!("target_maps entry must be object"))?;
+                    let (k, v) = obj.iter().next().ok_or_else(|| anyhow!("target_maps entry empty"))?;
+                    let key = value_to_string(&interpolate_inserts(&inserts_snapshot, k, &ctx)?);
+                    if key == "NULL" {
+                        target = Some(value_to_string(&interpolate_inserts(
+                            &inserts_snapshot,
+                            v.as_str().unwrap_or(""),
+                            &ctx,
+                        )?));
+                        break;
+                    }
+                }
+                if target.is_none() {
+                    return Err(anyhow!(
+                        "goto_map value could not be resolved but 'NULL' is not a key in target_maps"
+                    ));
+                }
+            } else {
+                for entry in target_maps {
+                    let obj = entry.as_object().ok_or_else(|| anyhow!("target_maps entry must be object"))?;
+                    let (k, v) = obj.iter().next().ok_or_else(|| anyhow!("target_maps entry empty"))?;
+                    let key = value_to_string(&interpolate_inserts(&inserts_snapshot, k, &ctx)?);
+                    let val = value_to_string(&interpolate_inserts(&inserts_snapshot, v.as_str().unwrap_or(""), &ctx)?);
+                    if wildcard_match(&key, &value_text) {
+                        target = Some(val);
+                        break;
+                    }
                 }
             }
             let target = target.ok_or_else(|| anyhow!("goto_map has no matches for '{value_text}'"))?;
@@ -923,7 +973,11 @@ fn wildcard_match(pattern: &str, s: &str) -> bool {
         }
     }
     regex.push('$');
-    regex::Regex::new(&regex).map(|re| re.is_match(s)).unwrap_or(false)
+    regex::RegexBuilder::new(&regex)
+        .dot_matches_new_line(true)
+        .build()
+        .map(|re| re.is_match(s))
+        .unwrap_or(false)
 }
 
 fn replace_map(
@@ -1015,7 +1069,10 @@ fn wildcard_captures(pattern: &str, text: &str) -> Vec<String> {
         }
     }
     regex.push('$');
-    let re = regex::Regex::new(&regex).unwrap();
+    let re = regex::RegexBuilder::new(&regex)
+        .dot_matches_new_line(true)
+        .build()
+        .unwrap();
     if let Some(caps) = re.captures(text) {
         caps.iter()
             .skip(1)
@@ -1316,6 +1373,17 @@ impl AgentIo {
         }
     }
     async fn select_index(&mut self, options: Vec<String>, description: Option<String>) -> Result<usize> {
+        if options.is_empty() {
+            let payload = json!({
+                "type": "user_choice",
+                "output": self.output,
+                "prompt": description,
+                "choices": HashMap::<String, String>::new(),
+            });
+            let _ = fs::remove_file(&self.input_path);
+            fs::write(&self.output_path, serde_json::to_string_pretty(&payload)?)?;
+            return Ok(0);
+        }
         let keys = if options.len() <= 9 {
             (1..=options.len()).map(|i| i.to_string()).collect::<Vec<_>>()
         } else {

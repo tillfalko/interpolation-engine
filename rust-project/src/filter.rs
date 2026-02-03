@@ -45,13 +45,7 @@ impl OutputFilter {
             }
         }
 
-        let mut safe = self.buffer.len();
-        for i in 0..self.buffer.len() {
-            if next_str.starts_with(&self.buffer[i..]) && !next_str.is_empty() {
-                safe = i;
-                break;
-            }
-        }
+        let safe = safe_index(&self.buffer, next_str);
 
         let delta = if self.shown {
             self.buffer[..safe].to_string()
@@ -96,13 +90,7 @@ impl InvertedFilter {
             self.shown = !self.shown;
         }
 
-        let mut safe = self.buffer.len();
-        for i in 0..self.buffer.len() {
-            if next_str.starts_with(&self.buffer[i..]) && !next_str.is_empty() {
-                safe = i;
-                break;
-            }
-        }
+        let safe = safe_index(&self.buffer, next_str);
         let delta = if self.shown {
             self.buffer[..safe].to_string()
         } else {
@@ -111,4 +99,18 @@ impl InvertedFilter {
         self.buffer = self.buffer[safe..].to_string();
         delta
     }
+}
+
+fn safe_index(buffer: &str, next_str: &str) -> usize {
+    if next_str.is_empty() {
+        return buffer.len();
+    }
+    let mut safe = buffer.len();
+    for (i, _) in buffer.char_indices() {
+        if next_str.starts_with(&buffer[i..]) {
+            safe = i;
+            break;
+        }
+    }
+    safe
 }
