@@ -105,10 +105,10 @@ pub async fn run_program(
     let named_tasks = program.named_tasks.clone();
     let ctx = Arc::new(ctx.clone());
 
-    let (ui_cmd, mut ui_events, ui_join) = if options.agent_mode {
+        let (ui_cmd, mut ui_events, ui_join) = if options.agent_mode {
         (None, None, None)
     } else {
-        let (cmd, events, join) = start_ui();
+        let (cmd, events, join) = start_ui(options.history_path.clone());
         (Some(cmd), Some(events), Some(join))
     };
 
@@ -376,7 +376,17 @@ async fn execute_task(
             let to_val = task.get("to_index").cloned().unwrap_or(Value::Null);
             let from = eval_math_index(&from_val, &inserts_snapshot, &ctx)?;
             let to = eval_math_index(&to_val, &inserts_snapshot, &ctx)?;
+            if to == 0 {
+                let output_name = as_string(&task, "output_name")?;
+                with_inserts(state, |ins| set_interpdata(ins, &output_name, Value::Array(Vec::new()))).await;
+                return Ok(TaskOutcome::None);
+            }
             let (start, end) = slice_indices(from, to, list.len())?;
+            if end < start {
+                let output_name = as_string(&task, "output_name")?;
+                with_inserts(state, |ins| set_interpdata(ins, &output_name, Value::Array(Vec::new()))).await;
+                return Ok(TaskOutcome::None);
+            }
             let slice = list[start..=end].to_vec();
             let output_name = as_string(&task, "output_name")?;
             with_inserts(state, |ins| set_interpdata(ins, &output_name, Value::Array(slice))).await;
@@ -1009,9 +1019,6 @@ fn slice_indices(from: i64, to: i64, len: usize) -> Result<(usize, usize)> {
     }
     if start < 0 || end < 0 || start >= len_i || end >= len_i {
         return Err(anyhow!("Slice indices out of bounds"));
-    }
-    if end < start {
-        std::mem::swap(&mut start, &mut end);
     }
     Ok((start as usize, end as usize))
 }

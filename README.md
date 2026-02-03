@@ -14,7 +14,7 @@ interpolation_engine my_program.json5
 ```
 Press `escape` at any time to toggle the main menu. Opening the menu stops program execution. Closing the menu resumes execution. From them menu you can save and load runtime states. Saved states are stored in the program file.
 Hold shift to select text.
-When prompted for text input you can press ctrl-n to enter linebreaks.
+When prompted for text input you can press ctrl-n to enter linebreaks. Up/Down cycle through input history. Press ctrl-r to search history (press again to jump to earlier matches, Enter to accept, Esc to cancel).
 
 Agent mode (for automated testing) waits for `user_input`/`user_choice` via files:
 ```

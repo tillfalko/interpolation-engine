@@ -12,7 +12,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Terminal,
 };
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -51,10 +52,10 @@ pub struct UiCommandHandle {
     cmd_tx: Sender<UiCommand>,
 }
 
-pub fn start_ui() -> (UiCommandHandle, tokio::sync::mpsc::UnboundedReceiver<UiEvent>, JoinHandle<()>) {
+pub fn start_ui(history_path: Option<PathBuf>) -> (UiCommandHandle, tokio::sync::mpsc::UnboundedReceiver<UiEvent>, JoinHandle<()>) {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = spawn_ui_thread(cmd_rx, event_tx);
+    let handle = spawn_ui_thread(cmd_rx, event_tx, history_path);
     (UiCommandHandle { cmd_tx }, event_rx, handle)
 }
 
@@ -123,6 +124,15 @@ enum Mode {
         allow_menu_toggle: bool,
         respond_to: Option<oneshot::Sender<String>>,
     },
+    Search {
+        prompt_inline: String,
+        buffer: String,
+        allow_menu_toggle: bool,
+        respond_to: Option<oneshot::Sender<String>>,
+        query: String,
+        original: String,
+        match_index: Option<usize>,
+    },
     Choice {
         description: Option<String>,
         options: Vec<String>,
@@ -136,16 +146,31 @@ struct UiState {
     output: String,
     info: String,
     mode: Mode,
+    history_path: Option<PathBuf>,
+    history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_stash: Option<String>,
 }
 
-fn spawn_ui_thread(cmd_rx: Receiver<UiCommand>, event_tx: UnboundedSender<UiEvent>) -> JoinHandle<()> {
+fn spawn_ui_thread(
+    cmd_rx: Receiver<UiCommand>,
+    event_tx: UnboundedSender<UiEvent>,
+    history_path: Option<PathBuf>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut terminal = setup_terminal().ok();
         let mut state = UiState {
             output: String::new(),
             info: String::new(),
             mode: Mode::Idle,
+            history_path,
+            history: Vec::new(),
+            history_cursor: None,
+            history_stash: None,
         };
+        if let Some(path) = &state.history_path {
+            state.history = load_history(path);
+        }
 
         let mut last_draw = Instant::now();
 
@@ -159,12 +184,12 @@ fn spawn_ui_thread(cmd_rx: Receiver<UiCommand>, event_tx: UnboundedSender<UiEven
             }
 
             if event::poll(Duration::from_millis(10)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
+            if let Ok(Event::Key(key)) = event::read() {
                     if handle_key(key, &mut state, &event_tx) {
                         cleanup_terminal(terminal.take());
                         return;
                     }
-                }
+            }
             }
 
             if last_draw.elapsed() > Duration::from_millis(16) {
@@ -198,6 +223,8 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
                 allow_menu_toggle,
                 respond_to: Some(respond_to),
             };
+            state.history_cursor = None;
+            state.history_stash = None;
         }
         UiCommand::BeginChoice {
             options,
@@ -216,7 +243,7 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
         }
         UiCommand::CancelInput => {
             match &mut state.mode {
-                Mode::Input { .. } | Mode::Choice { .. } => {
+                Mode::Input { .. } | Mode::Search { .. } | Mode::Choice { .. } => {
                     state.mode = Mode::Idle;
                 }
                 _ => {}
@@ -255,6 +282,9 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
         } => match key.code {
             KeyCode::Enter => {
                 let text = buffer.clone();
+                if let Some(path) = &state.history_path {
+                    let _ = append_history(path, &text);
+                }
                 if let Some(tx) = respond_to.take() {
                     let _ = tx.send(text);
                 }
@@ -266,11 +296,174 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 buffer.push('\n');
             }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let original = buffer.clone();
+                let (prompt_inline, allow_menu_toggle, respond_to) = match std::mem::replace(&mut state.mode, Mode::Idle) {
+                    Mode::Input { prompt_inline, allow_menu_toggle, respond_to, .. } => {
+                        (prompt_inline, allow_menu_toggle, respond_to)
+                    }
+                    other => {
+                        state.mode = other;
+                        return false;
+                    }
+                };
+                let match_index = find_history_match(&state.history, "", None);
+                let buffer = match_index.and_then(|i| state.history.get(i).cloned()).unwrap_or_else(|| original.clone());
+                state.mode = Mode::Search {
+                    prompt_inline,
+                    buffer,
+                    allow_menu_toggle,
+                    respond_to,
+                    query: String::new(),
+                    original,
+                    match_index,
+                };
+            }
+            KeyCode::Up => {
+                if state.history.is_empty() {
+                    return false;
+                }
+                let idx = match state.history_cursor {
+                    None => {
+                        state.history_stash = Some(buffer.clone());
+                        state.history.len().saturating_sub(1)
+                    }
+                    Some(i) => i.saturating_sub(1),
+                };
+                if let Some(entry) = state.history.get(idx).cloned() {
+                    *buffer = entry;
+                    state.history_cursor = Some(idx);
+                }
+            }
+            KeyCode::Down => {
+                if state.history.is_empty() {
+                    return false;
+                }
+                if let Some(i) = state.history_cursor {
+                    if i + 1 < state.history.len() {
+                        let idx = i + 1;
+                        if let Some(entry) = state.history.get(idx).cloned() {
+                            *buffer = entry;
+                            state.history_cursor = Some(idx);
+                        }
+                    } else {
+                        state.history_cursor = None;
+                        if let Some(stash) = state.history_stash.take() {
+                            *buffer = stash;
+                        }
+                    }
+                }
+            }
             KeyCode::Char(c) => {
                 buffer.push(c);
             }
             _ => {}
         },
+        Mode::Search { .. } => {
+            let mode = std::mem::replace(&mut state.mode, Mode::Idle);
+            let mut m = match mode {
+                Mode::Search {
+                    prompt_inline,
+                    buffer,
+                    allow_menu_toggle,
+                    respond_to,
+                    query,
+                    original,
+                    match_index,
+                } => (prompt_inline, buffer, allow_menu_toggle, respond_to, query, original, match_index),
+                other => {
+                    state.mode = other;
+                    return false;
+                }
+            };
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::Input {
+                        prompt_inline: m.0,
+                        buffer: m.5,
+                        allow_menu_toggle: m.2,
+                        respond_to: m.3,
+                    };
+                }
+                KeyCode::Enter => {
+                    state.mode = Mode::Input {
+                        prompt_inline: m.0,
+                        buffer: m.1,
+                        allow_menu_toggle: m.2,
+                        respond_to: m.3,
+                    };
+                }
+                KeyCode::Backspace => {
+                    m.4.pop();
+                    m.6 = find_history_match(&state.history, &m.4, None);
+                    if let Some(i) = m.6 {
+                        if let Some(entry) = state.history.get(i).cloned() {
+                            m.1 = entry;
+                        }
+                    } else {
+                        m.1 = m.5.clone();
+                    }
+                    state.mode = Mode::Search {
+                        prompt_inline: m.0,
+                        buffer: m.1,
+                        allow_menu_toggle: m.2,
+                        respond_to: m.3,
+                        query: m.4,
+                        original: m.5,
+                        match_index: m.6,
+                    };
+                }
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let start = m.6.and_then(|i| i.checked_sub(1));
+                    m.6 = find_history_match(&state.history, &m.4, start);
+                    if let Some(i) = m.6 {
+                        if let Some(entry) = state.history.get(i).cloned() {
+                            m.1 = entry;
+                        }
+                    }
+                    state.mode = Mode::Search {
+                        prompt_inline: m.0,
+                        buffer: m.1,
+                        allow_menu_toggle: m.2,
+                        respond_to: m.3,
+                        query: m.4,
+                        original: m.5,
+                        match_index: m.6,
+                    };
+                }
+                KeyCode::Char(c) => {
+                    m.4.push(c);
+                    m.6 = find_history_match(&state.history, &m.4, None);
+                    if let Some(i) = m.6 {
+                        if let Some(entry) = state.history.get(i).cloned() {
+                            m.1 = entry;
+                        }
+                    } else {
+                        m.1 = m.5.clone();
+                    }
+                    state.mode = Mode::Search {
+                        prompt_inline: m.0,
+                        buffer: m.1,
+                        allow_menu_toggle: m.2,
+                        respond_to: m.3,
+                        query: m.4,
+                        original: m.5,
+                        match_index: m.6,
+                    };
+                }
+                _ => {
+                    state.mode = Mode::Search {
+                        prompt_inline: m.0,
+                        buffer: m.1,
+                        allow_menu_toggle: m.2,
+                        respond_to: m.3,
+                        query: m.4,
+                        original: m.5,
+                        match_index: m.6,
+                    };
+                }
+            }
+        }
         Mode::Choice {
             options,
             keys,
@@ -307,6 +500,52 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
     false
 }
 
+fn append_history(path: &PathBuf, text: &str) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.write_all(&[HISTORY_RS])?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+const HISTORY_RS: u8 = 0x1e;
+
+fn load_history(path: &PathBuf) -> Vec<String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    if raw.as_bytes().contains(&HISTORY_RS) {
+        raw.split(HISTORY_RS as char)
+            .map(|s| s.trim_matches('\n').to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        raw.lines()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
+fn find_history_match(history: &[String], query: &str, start_from: Option<usize>) -> Option<usize> {
+    if history.is_empty() {
+        return None;
+    }
+    let mut idx = start_from.unwrap_or_else(|| history.len().saturating_sub(1));
+    loop {
+        if history[idx].contains(query) {
+            return Some(idx);
+        }
+        if idx == 0 {
+            break;
+        }
+        idx -= 1;
+    }
+    None
+}
+
 fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> io::Result<()> {
     terminal
         .draw(|f| {
@@ -325,11 +564,13 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
                 lines.join("\n")
             }
             Mode::Input { .. } => state.info.clone(),
+            Mode::Search { query, .. } => format!("reverse-i-search: {query}"),
             _ => String::new(),
         };
 
         let prompt_text = match &state.mode {
             Mode::Input { prompt_inline, buffer, .. } => format!("{prompt_inline}{buffer}"),
+            Mode::Search { prompt_inline, buffer, .. } => format!("{prompt_inline}{buffer}"),
             _ => String::new(),
         };
 
@@ -339,7 +580,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
         let info_pref = wrapped_line_count(&info_text, width).min(height);
 
         let (mut output_height, mut info_height) = match &state.mode {
-            Mode::Choice { .. } | Mode::Input { .. } => {
+            Mode::Choice { .. } | Mode::Input { .. } | Mode::Search { .. } => {
                 let available = height.saturating_sub(prompt_height);
                 let info_height = info_pref.min(available);
                 let output_height = available.saturating_sub(info_height);
@@ -370,16 +611,36 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(output, chunks[0]);
 
-        let info = Paragraph::new(info_text)
+        let info = Paragraph::new(info_text.clone())
             .style(Style::default().fg(Color::Yellow))
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(info, chunks[1]);
-        let prompt = Paragraph::new(prompt_text)
+        let prompt = Paragraph::new(prompt_text.clone())
             .style(Style::default().fg(Color::Yellow))
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(prompt, chunks[2]);
+
+        match &state.mode {
+            Mode::Input { .. } => {
+                if width > 0 && prompt_height > 0 {
+                    let (row, col) = cursor_offset(&prompt_text, width);
+                    let x = chunks[2].x.saturating_add(col as u16);
+                    let y = chunks[2].y.saturating_add(row as u16);
+                    f.set_cursor(x, y);
+                }
+            }
+            Mode::Search { .. } => {
+                if width > 0 && info_height > 0 {
+                    let (row, col) = cursor_offset(&info_text, width);
+                    let x = chunks[1].x.saturating_add(col as u16);
+                    let y = chunks[1].y.saturating_add(row as u16);
+                    f.set_cursor(x, y);
+                }
+            }
+            _ => {}
+        }
     })
     .map(|_| ())
 }
@@ -417,6 +678,24 @@ fn wrapped_line_count(text: &str, width: usize) -> usize {
         count += lines;
     }
     count
+}
+
+fn cursor_offset(text: &str, width: usize) -> (usize, usize) {
+    let mut row = 0;
+    let mut col = 0;
+    for ch in text.chars() {
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+            continue;
+        }
+        col += 1;
+        if col >= width {
+            row += 1;
+            col = 0;
+        }
+    }
+    (row, col)
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
