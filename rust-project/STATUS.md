@@ -1,4 +1,4 @@
-# Interpolation-Engine Rust Rewrite: Current Understanding and Plan
+# Interpolation-Engine Rust Rewrite: Current Status (Updated 2026-02-03)
 
 ## Understanding (Behavior + Compatibility)
 Interpolation-engine is a CLI runtime that executes "programs" defined in JSON5. A program has:
@@ -37,20 +37,20 @@ Implemented in `rust-project/` with the following:
 
 Build:
 - `reqwest` uses `rustls-tls` (no OpenSSL).
-- `cargo build` succeeds.
+- `cargo build` not re-run in this session (target/ exists).
 
-Verified runs (agent-mode):
-- `examples/hello_world.json5`
-- `examples/math.json5`
-- `examples/interactivity.json5`
+Local LLM server:
+- `http://localhost:8080/v1/models` is reachable in this environment (curl succeeds).
 
-Blocked in this environment:
-- Chat-based examples (local socket access to `localhost:8080` is blocked here).
+Verified runs (agent-mode) in this session:
+- Not yet run.
 
 ## Known Issues / Gaps
-- Many warnings (unused imports/vars) need cleanup.
+- `--log` and `--history` CLI options are parsed but unused in runtime (fields exist in `RuntimeOptions` only).
+- Save slots: Rust UI exposes 1..=9, while README/Python mention up to 10.
 - Static analyzer is simpler than Python version; it catches missing fields/labels but is not as exhaustive.
-- Chat examples cannot be fully validated in this sandbox due to local socket restrictions.
+- README lists `join_list`, but the Python runtime and Rust runtime implement `list_join` (doc mismatch).
+- Chat examples are not validated yet, but local API access is available (see above).
 
 ## Near-Term Plan
 1. **Finish compatibility testing**:
@@ -67,4 +67,3 @@ Blocked in this environment:
 ## Commands I Use
 - Build: `cargo build` (from `rust-project/`)
 - Run (agent mode): `./target/debug/interpolation-engine --agent-mode ../examples/hello_world.json5`
-

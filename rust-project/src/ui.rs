@@ -33,11 +33,13 @@ pub enum UiCommand {
     BeginInput {
         prompt: String,
         default: String,
+        allow_menu_toggle: bool,
         respond_to: oneshot::Sender<String>,
     },
     BeginChoice {
         options: Vec<String>,
         description: Option<String>,
+        allow_menu_toggle: bool,
         respond_to: oneshot::Sender<usize>,
     },
     CancelInput,
@@ -70,28 +72,37 @@ impl UiCommandHandle {
         let _ = self.cmd_tx.send(UiCommand::SetOutput(text));
     }
 
-    pub async fn user_input(&self, prompt: String, default: String) -> Result<String> {
+    pub async fn user_input(&self, prompt: String, default: String, allow_menu_toggle: bool) -> Result<String> {
         let (tx, rx) = oneshot::channel();
         let _ = self.cmd_tx.send(UiCommand::BeginInput {
             prompt,
             default,
+            allow_menu_toggle,
             respond_to: tx,
         });
-        Ok(rx.await?)
+        match rx.await {
+            Ok(value) => Ok(value),
+            Err(_) => Err(anyhow::anyhow!("cancelled")),
+        }
     }
 
     pub async fn select_index(
         &self,
         options: Vec<String>,
         description: Option<String>,
+        allow_menu_toggle: bool,
     ) -> Result<usize> {
         let (tx, rx) = oneshot::channel();
         let _ = self.cmd_tx.send(UiCommand::BeginChoice {
             options,
             description,
+            allow_menu_toggle,
             respond_to: tx,
         });
-        Ok(rx.await?)
+        match rx.await {
+            Ok(value) => Ok(value),
+            Err(_) => Err(anyhow::anyhow!("cancelled")),
+        }
     }
 
     pub fn cancel_input(&self) {
@@ -109,12 +120,14 @@ enum Mode {
     Input {
         prompt_inline: String,
         buffer: String,
+        allow_menu_toggle: bool,
         respond_to: Option<oneshot::Sender<String>>,
     },
     Choice {
         description: Option<String>,
         options: Vec<String>,
         keys: Vec<String>,
+        allow_menu_toggle: bool,
         respond_to: Option<oneshot::Sender<usize>>,
     },
 }
@@ -174,6 +187,7 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
         UiCommand::BeginInput {
             prompt,
             default,
+            allow_menu_toggle,
             respond_to,
         } => {
             let (outline, inline) = split_prompt(&prompt);
@@ -181,12 +195,14 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
             state.mode = Mode::Input {
                 prompt_inline: inline,
                 buffer: default,
+                allow_menu_toggle,
                 respond_to: Some(respond_to),
             };
         }
         UiCommand::BeginChoice {
             options,
             description,
+            allow_menu_toggle,
             respond_to,
         } => {
             let keys = build_choice_keys(options.len());
@@ -194,6 +210,7 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
                 description,
                 options,
                 keys,
+                allow_menu_toggle,
                 respond_to: Some(respond_to),
             };
         }
@@ -211,9 +228,18 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
 
 fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiEvent>) -> bool {
     if key.code == KeyCode::Esc {
-        let _ = event_tx.send(UiEvent::ToggleMenu);
-        state.mode = Mode::Idle;
-        return false;
+        match &state.mode {
+            Mode::Input { allow_menu_toggle: false, .. }
+            | Mode::Choice { allow_menu_toggle: false, .. } => {
+                state.mode = Mode::Idle;
+                return false;
+            }
+            _ => {
+                let _ = event_tx.send(UiEvent::ToggleMenu);
+                state.mode = Mode::Idle;
+                return false;
+            }
+        }
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         let _ = event_tx.send(UiEvent::Quit);
@@ -225,6 +251,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
             prompt_inline: _,
             buffer,
             respond_to,
+            ..
         } => match key.code {
             KeyCode::Enter => {
                 let text = buffer.clone();
@@ -284,16 +311,6 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
     terminal
         .draw(|f| {
         let size = f.size();
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3), Constraint::Length(3)].as_ref())
-            .split(size);
-
-        let output = Paragraph::new(Text::from(state.output.clone()))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::NONE));
-        f.render_widget(output, chunks[0]);
-
         let info_text = match &state.mode {
             Mode::Choice { description, options, keys, .. } => {
                 let mut lines = Vec::new();
@@ -311,16 +328,53 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
             _ => String::new(),
         };
 
+        let prompt_text = match &state.mode {
+            Mode::Input { prompt_inline, buffer, .. } => format!("{prompt_inline}{buffer}"),
+            _ => String::new(),
+        };
+
+        let width = size.width as usize;
+        let height = size.height as usize;
+        let prompt_height = wrapped_line_count(&prompt_text, width).min(height);
+        let info_pref = wrapped_line_count(&info_text, width).min(height);
+
+        let (mut output_height, mut info_height) = match &state.mode {
+            Mode::Choice { .. } | Mode::Input { .. } => {
+                let available = height.saturating_sub(prompt_height);
+                let info_height = info_pref.min(available);
+                let output_height = available.saturating_sub(info_height);
+                (output_height, info_height)
+            }
+            Mode::Idle => {
+                let available = height.saturating_sub(prompt_height);
+                (available, 0)
+            }
+        };
+
+        let used = output_height + info_height + prompt_height;
+        if used < height {
+            output_height += height - used;
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(output_height as u16),
+                Constraint::Length(info_height as u16),
+                Constraint::Length(prompt_height as u16),
+            ])
+            .split(size);
+
+        let output = Paragraph::new(Text::from(state.output.clone()))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::NONE));
+        f.render_widget(output, chunks[0]);
+
         let info = Paragraph::new(info_text)
             .style(Style::default().fg(Color::Yellow))
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(info, chunks[1]);
-
-        let prompt_text = match &state.mode {
-            Mode::Input { prompt_inline, buffer, .. } => format!("{prompt_inline}{buffer}"),
-            _ => String::new(),
-        };
         let prompt = Paragraph::new(prompt_text)
             .style(Style::default().fg(Color::Yellow))
             .wrap(Wrap { trim: false })
@@ -350,6 +404,19 @@ fn build_choice_keys(n: usize) -> Vec<String> {
         }
     }
     keys
+}
+
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+    if text.is_empty() || width == 0 {
+        return 0;
+    }
+    let mut count = 0;
+    for line in text.split('\n') {
+        let len = line.chars().count();
+        let lines = if len == 0 { 1 } else { (len - 1) / width + 1 };
+        count += lines;
+    }
+    count
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {

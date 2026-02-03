@@ -181,12 +181,12 @@ Example:<br>
 {cmd: "random_choice", list: ["red", "green"], output_name: "color"}
 ```
 
-#### `join_list`
+#### `list_join`
 Fields: `list`, `before`, `between`, `after`, `output_name`<br>
 Joins list items into a string with prefix/suffix.<br>
 Example:<br>
 ```json5
-{cmd: "join_list", list: [1, 2, 3], before: "[", between: ", ", after: "]", output_name: "nums"}
+{cmd: "list_join", list: [1, 2, 3], before: "[", between: ", ", after: "]", output_name: "nums"}
 ```
 
 #### `list_concat`

@@ -186,16 +186,39 @@ pub async fn run_program(
                 loop {
                     tokio::select! {
                         res = &mut exec_fut => {
-                            match res? {
-                                TaskOutcome::None => {
+                            match res {
+                                Ok(TaskOutcome::None) => {
                                     state.lock().await.set_i64("order_index", task_index as i64 + 2);
+                                    break;
                                 }
-                                TaskOutcome::Goto(target) => {
+                                Ok(TaskOutcome::Goto(target)) => {
                                     let idx = find_label_index(&program.order, &target)?;
                                     state.lock().await.set_i64("order_index", (idx + 2) as i64);
+                                    break;
+                                }
+                                Err(e) => {
+                                    if is_cancelled(&e) || token.is_cancelled() {
+                                        let mut saw_event = false;
+                                        while let Ok(ev) = events.try_recv() {
+                                            match ev {
+                                                UiEvent::ToggleMenu => {
+                                                    menu_open = true;
+                                                    saw_event = true;
+                                                }
+                                                UiEvent::Quit => {
+                                                    kill = true;
+                                                    saw_event = true;
+                                                }
+                                            }
+                                        }
+                                        if !saw_event {
+                                            menu_open = true;
+                                        }
+                                        break;
+                                    }
+                                    return Err(e);
                                 }
                             }
-                            break;
                         }
                         ev = events.recv() => {
                             match ev {
@@ -363,11 +386,11 @@ async fn execute_task(
             let description = as_string(&task, "description")?;
             let output_name = as_string(&task, "output_name")?;
             if list.is_empty() {
-                let _ = io.select_index(Vec::new(), Some(description)).await?;
+                let _ = io.select_index(Vec::new(), Some(description), true).await?;
                 with_inserts(state, |ins| set_interpdata(ins, &output_name, Value::Null)).await;
             } else {
                 let options = list.iter().map(value_to_string).collect::<Vec<_>>();
-                let choice_index = io.select_index(options, Some(description)).await?;
+                let choice_index = io.select_index(options, Some(description), true).await?;
                 let choice = list
                     .get(choice_index)
                     .ok_or_else(|| anyhow!("Choice index out of bounds"))?
@@ -378,7 +401,7 @@ async fn execute_task(
         "user_input" => {
             let prompt = as_string(&task, "prompt")?;
             let output_name = as_string(&task, "output_name")?;
-            let input = io.user_input(prompt, String::new()).await?;
+            let input = io.user_input(prompt, String::new(), true).await?;
             let escaped = input
                 .replace(INSERT_START, &format!("{ESCAPE}{INSERT_START}"))
                 .replace(INSERT_STOP, &format!("{ESCAPE}{INSERT_STOP}"));
@@ -679,12 +702,15 @@ async fn execute_task(
         "show_inserts" => {
             let inserts = state.lock().await.inserts().clone();
             let text = serde_json::to_string_pretty(&Value::Object(inserts))?;
-            let _ = io.select_index(vec!["Dismiss".to_string()], Some(text)).await?;
+            let _ = io.select_index(vec!["Dismiss".to_string()], Some(text), true).await?;
         }
         "random_choice" => {
             let list = as_array(&task, "list")?;
             let output_name = as_string(&task, "output_name")?;
-            let idx = random::<usize>() % list.len().max(1);
+            if list.is_empty() {
+                return Err(anyhow!("random_choice list is empty"));
+            }
+            let idx = random::<usize>() % list.len();
             let item = list.get(idx).cloned().unwrap_or(Value::Null);
             with_inserts(state, |ins| set_interpdata(ins, &output_name, item)).await;
         }
@@ -790,14 +816,17 @@ async fn execute_task(
                 .remove("hide_stop_str")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
-            let n_outputs = completion
-                .remove("n_outputs")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1);
-            let shown = completion
-                .remove("shown")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+            let n_outputs = match completion.remove("n_outputs") {
+                Some(Value::Number(n)) => n.as_i64().unwrap_or(1),
+                Some(Value::String(s)) => s.parse::<i64>().unwrap_or(1),
+                _ => 1,
+            };
+            let shown = match completion.remove("shown") {
+                Some(Value::Bool(b)) => b,
+                Some(Value::String(s)) if s == "true" => true,
+                Some(Value::String(s)) if s == "false" => false,
+                _ => true,
+            };
             let choices_list = completion
                 .remove("choices_list")
                 .and_then(|v| v.as_array().cloned())
@@ -823,6 +852,9 @@ async fn execute_task(
 
             let messages = interpolate_messages(messages, &inserts_snapshot, &ctx)?;
 
+            completion.remove("line");
+            completion.remove("traceback_label");
+
             let mut tts_writer = if let Some(path) = voice_path.clone() {
                 let resolved = resolve_path(&ctx, &path);
                 Some(io.start_tts_stream(&resolved.to_string_lossy(), voice_speaker).await?)
@@ -842,24 +874,36 @@ async fn execute_task(
                 Ok(())
             };
 
-            let (outputs, visual_output) = run_chat(
-                ChatArgs {
-                    messages,
-                    completion_args: completion,
-                    start_str,
-                    stop_str,
-                    hide_start_str,
-                    hide_stop_str,
-                    n_outputs,
-                    shown,
-                    choices_list,
-                    extra_body,
-                    api_url,
-                    api_key,
-                },
-                Some(&mut on_text),
-            )
-            .await?;
+            let (outputs, visual_output) = loop {
+                let (outputs, visual_output) = run_chat(
+                    ChatArgs {
+                        messages: messages.clone(),
+                        completion_args: completion.clone(),
+                        start_str: start_str.clone(),
+                        stop_str: stop_str.clone(),
+                        hide_start_str: hide_start_str.clone(),
+                        hide_stop_str: hide_stop_str.clone(),
+                        n_outputs,
+                        shown,
+                        choices_list: choices_list.clone(),
+                        extra_body: extra_body.clone(),
+                        api_url: api_url.clone(),
+                        api_key: api_key.clone(),
+                    },
+                    Some(&mut on_text),
+                )
+                .await?;
+                if outputs.len() < n_outputs as usize {
+                    io.write(format!(
+                        "\n(Expected {n_outputs} outputs, got {}. Retrying.)\n",
+                        outputs.len()
+                    ))
+                    .await;
+                    sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                break (outputs, visual_output);
+            };
 
             if outputs.len() == 1 {
                 with_inserts(state.clone(), |ins| {
@@ -932,9 +976,17 @@ fn eval_index(value: &Value, inserts: &Map<String, Value>, ctx: &ProgramLoadCont
         value.as_i64().ok_or_else(|| anyhow!("Index must be int"))?
     };
     if idx > 0 {
-        Ok((idx - 1) as usize)
+        let pos = idx - 1;
+        if pos < 0 || pos >= len as i64 {
+            return Err(anyhow!("Index out of bounds"));
+        }
+        Ok(pos as usize)
     } else if idx < 0 {
-        Ok((len as i64 + idx) as usize)
+        let pos = len as i64 + idx;
+        if pos < 0 || pos >= len as i64 {
+            return Err(anyhow!("Index out of bounds"));
+        }
+        Ok(pos as usize)
     } else {
         Err(anyhow!("Index 0 is invalid (1-based indexing)"))
     }
@@ -1119,7 +1171,7 @@ async fn main_menu(
 ) -> Result<MenuAction> {
     let mut status = String::new();
     loop {
-        let choice = ui
+        let choice = match ui
             .select_index(
                 vec![
                     "Save State".to_string(),
@@ -1128,20 +1180,48 @@ async fn main_menu(
                     "Quit".to_string(),
                 ],
                 if status.is_empty() { None } else { Some(status.clone()) },
+                false,
             )
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => {
+                if is_cancelled(&e) {
+                    return Ok(MenuAction::Close);
+                }
+                return Err(e);
+            }
+        };
         match choice {
             0 => {
                 let slots = collect_slots(&program.save_states);
                 let labels = slots.iter().map(|s| s.label.clone()).collect::<Vec<_>>();
-                let idx = ui.select_index(labels, None).await?;
+                let idx = match ui.select_index(labels, None, false).await {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if is_cancelled(&e) {
+                            return Ok(MenuAction::Close);
+                        }
+                        return Err(e);
+                    }
+                };
                 let default_label = slots[idx].label.clone();
-                let label = ui
+                let label = match ui
                     .user_input(
                         "What do you want to call this save state?\n> ".to_string(),
                         if default_label == "(Empty Slot)" { "".to_string() } else { default_label },
+                        false,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if is_cancelled(&e) {
+                            return Ok(MenuAction::Close);
+                        }
+                        return Err(e);
+                    }
+                };
                 let mut st = state.lock().await;
                 let mut saved = st.data.clone();
                 saved.insert("label".to_string(), Value::String(label.clone()));
@@ -1150,11 +1230,20 @@ async fn main_menu(
                     .insert((idx + 1).to_string(), Value::Object(saved));
                 save_program(program, ctx)?;
                 status = format!("Saved '{label}' to slot {}.", idx + 1);
+                continue;
             }
             1 => {
                 let slots = collect_slots(&program.save_states);
                 let labels = slots.iter().map(|s| s.label.clone()).collect::<Vec<_>>();
-                let idx = ui.select_index(labels, None).await?;
+                let idx = match ui.select_index(labels, None, false).await {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if is_cancelled(&e) {
+                            return Ok(MenuAction::Close);
+                        }
+                        return Err(e);
+                    }
+                };
                 if slots[idx].is_empty {
                     status = "Cannot load empty slot.".to_string();
                     continue;
@@ -1167,6 +1256,7 @@ async fn main_menu(
                 let output = st.get_output();
                 ui.set_output(output);
                 status = format!("Loaded '{}'.", slots[idx].label);
+                continue;
             }
             2 => {
                 let mut load_ctx = ProgramLoadContext::new(ctx.program_path.clone(), ctx.inserts_dir.clone())?;
@@ -1193,12 +1283,17 @@ async fn main_menu(
                 completion_args.clear();
                 completion_args.extend(program.completion_args.clone());
                 status = "Restarted program after reloading.".to_string();
+                continue;
             }
             3 => return Ok(MenuAction::Quit),
             _ => {}
         }
         return Ok(MenuAction::Close);
     }
+}
+
+fn is_cancelled(err: &anyhow::Error) -> bool {
+    err.to_string() == "cancelled"
 }
 
 fn save_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()> {
@@ -1304,15 +1399,15 @@ impl Io {
             }
         }
     }
-    async fn user_input(&self, prompt: String, default: String) -> Result<String> {
+    async fn user_input(&self, prompt: String, default: String, allow_menu_toggle: bool) -> Result<String> {
         match self {
-            Io::Ui(ui) => ui.user_input(prompt, default).await,
+            Io::Ui(ui) => ui.user_input(prompt, default, allow_menu_toggle).await,
             Io::Agent(agent) => agent.lock().await.user_input(prompt).await,
         }
     }
-    async fn select_index(&self, options: Vec<String>, description: Option<String>) -> Result<usize> {
+    async fn select_index(&self, options: Vec<String>, description: Option<String>, allow_menu_toggle: bool) -> Result<usize> {
         match self {
-            Io::Ui(ui) => ui.select_index(options, description).await,
+            Io::Ui(ui) => ui.select_index(options, description, allow_menu_toggle).await,
             Io::Agent(agent) => agent.lock().await.select_index(options, description).await,
         }
     }

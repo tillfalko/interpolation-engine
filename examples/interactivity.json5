@@ -18,5 +18,13 @@
     named_tasks:{
     },
     save_states : {
+      "2": {
+        "inserts": {
+          "name": "tom"
+        },
+        "label": "test2",
+        "order_index": 2,
+        "output": ""
+      }
     },
 }
