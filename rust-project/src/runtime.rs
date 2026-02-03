@@ -7,6 +7,7 @@ use crate::interp::{
 use crate::math::eval_math;
 use crate::model::{Program, ProgramLoadContext, Task};
 use crate::save::splice_key_into_json5;
+use crate::audio_web;
 use crate::ui::{start_ui, UiCommandHandle, UiEvent};
 use anyhow::{anyhow, Result};
 use rand::random;
@@ -27,6 +28,8 @@ pub struct RuntimeOptions {
     pub agent_output: PathBuf,
     pub log_path: Option<PathBuf>,
     pub history_path: Option<PathBuf>,
+    pub audio_web: bool,
+    pub audio_port: u16,
 }
 
 #[derive(Clone)]
@@ -87,6 +90,10 @@ pub async fn run_program(
     args: &[String],
     options: RuntimeOptions,
 ) -> Result<()> {
+    audio_web::init_config(audio_web::AudioWebConfig {
+        enabled: options.audio_web,
+        port: options.audio_port,
+    });
     let state = Arc::new(Mutex::new(State::from_default(&program.default_state)));
 
     {
@@ -259,6 +266,15 @@ pub async fn run_program(
         Ok::<(), anyhow::Error>(())
     }
     .await;
+
+    if options.audio_web {
+        audio_web::wait_for_idle(
+            Duration::from_millis(300),
+            Duration::from_secs(10),
+            Duration::from_millis(1200),
+        )
+        .await;
+    }
 
     if let (Io::Ui(ui), Some(join)) = (&io, ui_join) {
         ui.shutdown();
@@ -1536,6 +1552,8 @@ impl AgentIo {
 struct TtsWriter {
     child: Option<std::process::Child>,
     buffer: String,
+    web: Option<audio_web::AudioBroadcaster>,
+    _reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TtsWriter {
@@ -1544,7 +1562,9 @@ impl TtsWriter {
             return Err(anyhow!("voice_path was set but 'piper' was not found on PATH."));
         }
         if !which::which("pw-play").is_ok() {
-            return Err(anyhow!("voice_path was set but 'pw-play' was not found on PATH."));
+            if !audio_web::config().enabled {
+                return Err(anyhow!("voice_path was set but 'pw-play' was not found on PATH."));
+            }
         }
         if !std::path::Path::new(voice_path).exists() {
             return Err(anyhow!("voice_path does not exist: {voice_path}"));
@@ -1590,24 +1610,47 @@ impl TtsWriter {
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
         let mut child = cmd.spawn()?;
-        let piper_out = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("Failed to open Piper stdout"))?;
-        let mut pw = std::process::Command::new("pw-play");
-        pw.arg("-a")
-            .arg("--rate")
-            .arg(rate.to_string())
-            .arg("--channels")
-            .arg(channels.to_string())
-            .arg("--format")
-            .arg("s16")
-            .arg("-")
-            .stdin(piper_out);
-        let _ = pw.spawn();
+        let mut web = None;
+        let mut reader = None;
+        if audio_web::config().enabled {
+            let broadcaster = audio_web::get_or_start(rate as u32, channels as u16)?;
+            if let Some(stdout) = child.stdout.take() {
+                let tx = broadcaster.clone();
+                reader = Some(std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let mut rdr = std::io::BufReader::new(stdout);
+                    loop {
+                        match std::io::Read::read(&mut rdr, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => tx.send(buf[..n].to_vec()),
+                            Err(_) => break,
+                        }
+                    }
+                }));
+                web = Some(broadcaster);
+            }
+        } else {
+            let piper_out = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow!("Failed to open Piper stdout"))?;
+            let mut pw = std::process::Command::new("pw-play");
+            pw.arg("-a")
+                .arg("--rate")
+                .arg(rate.to_string())
+                .arg("--channels")
+                .arg(channels.to_string())
+                .arg("--format")
+                .arg("s16")
+                .arg("-")
+                .stdin(piper_out);
+            let _ = pw.spawn();
+        }
         Ok(Self {
             child: Some(child),
             buffer: String::new(),
+            web,
+            _reader: reader,
         })
     }
 
@@ -1615,6 +1658,8 @@ impl TtsWriter {
         Self {
             child: None,
             buffer: String::new(),
+            web: None,
+            _reader: None,
         }
     }
 

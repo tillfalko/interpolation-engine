@@ -7,6 +7,7 @@ mod model;
 mod parser;
 mod runtime;
 mod save;
+mod audio_web;
 mod ui;
 
 use anyhow::Result;
@@ -41,6 +42,12 @@ struct Args {
     /// Agent input path (selected choice / text).
     #[arg(long = "agent-input", default_value = "/tmp/agent_input")]
     agent_input: PathBuf,
+    /// Serve audio via a local web page for TTS playback.
+    #[arg(long = "audio-web")]
+    audio_web: bool,
+    /// Port for the local audio web server.
+    #[arg(long = "audio-port", default_value_t = 8765)]
+    audio_port: u16,
 }
 
 #[tokio::main]
@@ -70,6 +77,8 @@ async fn main() -> Result<()> {
             agent_output: args.agent_output,
             log_path: args.log,
             history_path: args.history,
+            audio_web: args.audio_web,
+            audio_port: args.audio_port,
         },
     )
     .await?;
