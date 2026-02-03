@@ -37,7 +37,7 @@ Implemented in `rust-project/` with the following:
 
 Build:
 - `reqwest` uses `rustls-tls` (no OpenSSL).
-- `cargo build` not re-run in this session (target/ exists).
+- `cargo build` last run in this session (warnings remain).
 
 Local LLM server:
 - `http://localhost:8080/v1/models` is reachable in this environment (curl succeeds).
@@ -46,7 +46,7 @@ Verified runs (agent-mode) in this session:
 - Not yet run.
 
 ## Known Issues / Gaps
-- `--log` and `--history` CLI options are parsed but unused in runtime (fields exist in `RuntimeOptions` only).
+- `--log` is parsed but unused in runtime (field exists in `RuntimeOptions` only).
 - Save slots: Rust UI exposes 1..=9, while README/Python mention up to 10.
 - Static analyzer is simpler than Python version; it catches missing fields/labels but is not as exhaustive.
 - README lists `join_list`, but the Python runtime and Rust runtime implement `list_join` (doc mismatch).
@@ -57,12 +57,21 @@ Verified runs (agent-mode) in this session:
    - Run `api.json5`, `character_creator.json5`, `text_adventure*.json5` once local socket access is available.
 2. **Polish warnings**:
    - Remove unused imports/vars.
-   - Trim dead fields (e.g., unused `log_path`/`history_path`) or implement them.
+   - Trim dead fields (e.g., unused `log_path`) or implement them.
 3. **Stabilize error handling**:
    - Ensure all runtime errors preserve terminal state (already fixed for main TUI shutdown).
 4. **Static analyzer improvements**:
    - Expand interpolation key analysis (closer to Python behavior).
    - Add better diagnostics for `goto_map` and nested tasks.
+
+## Recent Improvements
+- TUI: user_choice options now render fully; choice text is bottom-aligned like user_input.
+- Main menu: Esc open/close stable, save/load/restart keeps menu open to display status messages.
+- Input history: `--history` now records inputs; Up/Down navigation and Ctrl-R reverse search supported (multi-line entries preserved).
+- list_slice: supports `to_index == 0` and returns empty list when `to_index < from_index`.
+- random_choice: now errors on empty lists (matches Python behavior).
+- chat: parses `n_outputs`/`shown` string values, retries if fewer outputs than requested, strips `line`/`traceback_label` before API call.
+- Validation: `voice_path` is checked for literal paths during program analysis and at runtime before starting TTS.
 
 ## Commands I Use
 - Build: `cargo build` (from `rust-project/`)
