@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
-pub fn splice_key_into_json5(content: &str, key: &str, new_value: &Value, indent: usize) -> Result<String> {
+pub fn splice_key_into_json5(content: &str, key: &str, new_value: &Value, _indent: usize) -> Result<String> {
     let pattern = format!(r#"(['"]?{key}['"]?)\s*:\s*\{{"#);
     let re = regex::Regex::new(&pattern)?;
     let mat = re

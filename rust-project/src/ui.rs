@@ -694,7 +694,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
         let prompt_height = wrapped_line_count(&prompt_text, width).min(height);
         let info_pref = wrapped_line_count(&info_text, width).min(height);
 
-        let (mut output_height, mut info_height) = match &state.mode {
+        let (mut output_height, info_height) = match &state.mode {
             Mode::Choice { .. } | Mode::Input { .. } | Mode::Search { .. } => {
                 let available = height.saturating_sub(prompt_height);
                 let info_height = info_pref.min(available);

@@ -8,9 +8,6 @@ pub const INSERT_START: char = '{';
 pub const INSERT_STOP: char = '}';
 pub const ESCAPE: char = '\\';
 
-#[derive(Debug)]
-pub struct InterpolationError(pub String);
-
 pub fn get_simple_insertkey(content: &str) -> Option<String> {
     let mut depth = 0;
     let chars: Vec<char> = content.chars().collect();

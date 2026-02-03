@@ -21,7 +21,7 @@ pub struct ChatArgs {
 }
 
 pub async fn run_chat(
-    mut args: ChatArgs,
+    args: ChatArgs,
     mut on_text: Option<&mut dyn FnMut(&str) -> Result<()>>,
 ) -> Result<(Vec<String>, String)> {
     if (!args.start_str.is_empty()) ^ (!args.stop_str.is_empty()) {

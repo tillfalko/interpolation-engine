@@ -1,7 +1,7 @@
-use crate::interp::extract_insert_keys;
+use crate::interp::{extract_insert_keys, get_interpdata, get_simple_insertkey};
 use crate::model::{Program, ProgramLoadContext, Task};
 use anyhow::{anyhow, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -17,6 +17,12 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
 
     let insert_keys = collect_possible_insert_keys(program, ctx);
     let global_labels = collect_labels(program);
+    let default_inserts = program
+        .default_state
+        .get("inserts")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
 
     let mut named = HashSet::new();
     for name in program.named_tasks.keys() {
@@ -29,6 +35,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
         &named,
         &insert_keys,
         &global_labels,
+        &default_inserts,
         ctx,
         &mut diags,
     );
@@ -40,6 +47,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
             &named,
             &insert_keys,
             &global_labels,
+            &default_inserts,
             ctx,
             &mut diags,
         );
@@ -109,11 +117,21 @@ fn analyze_task_list(
     named_tasks: &HashSet<String>,
     insert_keys: &HashSet<String>,
     global_labels: &HashSet<String>,
+    default_inserts: &Map<String, Value>,
     ctx: &ProgramLoadContext,
     diags: &mut Vec<Diagnostic>,
 ) {
     for task in tasks {
-        validate_task(task, scope_name, named_tasks, insert_keys, global_labels, ctx, diags);
+        validate_task(
+            task,
+            scope_name,
+            named_tasks,
+            insert_keys,
+            global_labels,
+            default_inserts,
+            ctx,
+            diags,
+        );
         if let Some(subtasks) = task.get("tasks").and_then(Value::as_array) {
             let subtasks = subtasks
                 .iter()
@@ -126,6 +144,7 @@ fn analyze_task_list(
                     named_tasks,
                     insert_keys,
                     global_labels,
+                    default_inserts,
                     ctx,
                     diags,
                 );
@@ -140,6 +159,7 @@ fn validate_task(
     named_tasks: &HashSet<String>,
     insert_keys: &HashSet<String>,
     labels: &HashSet<String>,
+    default_inserts: &Map<String, Value>,
     ctx: &ProgramLoadContext,
     diags: &mut Vec<Diagnostic>,
 ) {
@@ -152,26 +172,87 @@ fn validate_task(
     };
 
     match cmd {
-        "print" => require_fields(task, &["text"], diags),
+        "print" => {
+            require_fields(task, &["text"], diags);
+            require_string(task, "text", default_inserts, ctx, diags);
+        }
         "clear" => {}
-        "sleep" => require_fields(task, &["seconds"], diags),
-        "set" => require_fields(task, &["item", "output_name"], diags),
-        "unescape" => require_fields(task, &["item", "output_name"], diags),
-        "write" => require_fields(task, &["item", "path"], diags),
+        "sleep" => {
+            require_fields(task, &["seconds"], diags);
+        }
+        "set" => {
+            require_fields(task, &["item", "output_name"], diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "unescape" => {
+            require_fields(task, &["item", "output_name"], diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "write" => {
+            require_fields(task, &["item", "path"], diags);
+            require_string(task, "path", default_inserts, ctx, diags);
+        }
         "show_inserts" => {}
-        "random_choice" => require_fields(task, &["list", "output_name"], diags),
-        "list_join" => require_fields(task, &["list", "before", "between", "after", "output_name"], diags),
-        "list_concat" => require_fields(task, &["lists", "output_name"], diags),
-        "list_append" => require_fields(task, &["list", "item", "output_name"], diags),
-        "list_remove" => require_fields(task, &["list", "item", "output_name"], diags),
-        "list_index" => require_fields(task, &["list", "index", "output_name"], diags),
-        "list_slice" => require_fields(task, &["list", "from_index", "to_index", "output_name"], diags),
-        "user_input" => require_fields(task, &["prompt", "output_name"], diags),
-        "user_choice" => require_fields(task, &["list", "description", "output_name"], diags),
-        "await_insert" => require_fields(task, &["name"], diags),
-        "label" => require_fields(task, &["name"], diags),
+        "random_choice" => {
+            require_fields(task, &["list", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "list_join" => {
+            require_fields(task, &["list", "before", "between", "after", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "before", default_inserts, ctx, diags);
+            require_string(task, "between", default_inserts, ctx, diags);
+            require_string(task, "after", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "list_concat" => {
+            require_fields(task, &["lists", "output_name"], diags);
+            require_array(task, "lists", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "list_append" => {
+            require_fields(task, &["list", "item", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "list_remove" => {
+            require_fields(task, &["list", "item", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "list_index" => {
+            require_fields(task, &["list", "index", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "list_slice" => {
+            require_fields(task, &["list", "from_index", "to_index", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "user_input" => {
+            require_fields(task, &["prompt", "output_name"], diags);
+            require_string(task, "prompt", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "user_choice" => {
+            require_fields(task, &["list", "description", "output_name"], diags);
+            require_array(task, "list", default_inserts, ctx, diags);
+            require_string(task, "description", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
+        "await_insert" => {
+            require_fields(task, &["name"], diags);
+            require_string(task, "name", default_inserts, ctx, diags);
+        }
+        "label" => {
+            require_fields(task, &["name"], diags);
+            require_string(task, "name", default_inserts, ctx, diags);
+        }
         "goto" => {
             require_fields(task, &["name"], diags);
+            require_string(task, "name", default_inserts, ctx, diags);
             if let Some(target) = task.get("name").and_then(Value::as_str) {
                 if target != "CONTINUE" && !labels.contains(target) {
                     diags.push(diag(
@@ -183,6 +264,8 @@ fn validate_task(
         }
         "goto_map" => {
             require_fields(task, &["text", "target_maps"], diags);
+            require_string(task, "text", default_inserts, ctx, diags);
+            require_array(task, "target_maps", default_inserts, ctx, diags);
             if let Some(target_maps) = task.get("target_maps").and_then(Value::as_array) {
                 for entry in target_maps {
                     let obj = match entry.as_object() {
@@ -196,7 +279,10 @@ fn validate_task(
                         diags.push(diag(task, "target_maps entries must have 1 key".to_string()));
                         continue;
                     }
-                    let (_, target_val) = obj.iter().next().unwrap();
+                    let (target_key, target_val) = obj.iter().next().unwrap();
+                    if target_key.as_str().is_empty() {
+                        diags.push(diag(task, "target_maps keys must be non-empty strings".to_string()));
+                    }
                     if let Some(target) = target_val.as_str() {
                         if !target.contains('{') && target != "CONTINUE" && !labels.contains(target) {
                             diags.push(diag(
@@ -204,33 +290,74 @@ fn validate_task(
                                 format!("goto_map target '{target}' not found in {scope_name}"),
                             ));
                         }
+                    } else {
+                        diags.push(diag(task, "target_maps values must be strings".to_string()));
                     }
                 }
             }
         }
-        "replace_map" => require_fields(task, &["item", "output_name", "wildcard_maps"], diags),
-        "for" => require_fields(task, &["name_list_map", "tasks"], diags),
-        "serial" | "parallel_wait" | "parallel_race" => require_fields(task, &["tasks"], diags),
+        "replace_map" => {
+            require_fields(task, &["item", "output_name", "wildcard_maps"], diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+            require_array(task, "wildcard_maps", default_inserts, ctx, diags);
+            if let Some(maps) = task.get("wildcard_maps").and_then(Value::as_array) {
+                for entry in maps {
+                    let obj = match entry.as_object() {
+                        Some(o) => o,
+                        None => {
+                            diags.push(diag(task, "wildcard_maps entries must be objects".to_string()));
+                            continue;
+                        }
+                    };
+                    if obj.len() != 1 {
+                        diags.push(diag(task, "wildcard_maps entries must have 1 key".to_string()));
+                    }
+                }
+            }
+        }
+        "for" => {
+            require_fields(task, &["name_list_map", "tasks"], diags);
+            require_object(task, "name_list_map", default_inserts, ctx, diags);
+            require_task_array(task, "tasks", default_inserts, ctx, diags);
+        }
+        "serial" | "parallel_wait" | "parallel_race" => {
+            require_fields(task, &["tasks"], diags);
+            require_task_array(task, "tasks", default_inserts, ctx, diags);
+        }
         "run_task" => {
             require_fields(task, &["task_name"], diags);
+            require_string(task, "task_name", default_inserts, ctx, diags);
             if let Some(name) = task.get("task_name").and_then(Value::as_str) {
                 if !named_tasks.contains(name) {
                     diags.push(diag(task, format!("run_task references unknown task '{name}'")));
                 }
             }
         }
-        "delete" | "delete_except" => require_fields(task, &["wildcards"], diags),
-        "math" => require_fields(task, &["input", "output_name"], diags),
+        "delete" | "delete_except" => {
+            require_fields(task, &["wildcards"], diags);
+            require_array(task, "wildcards", default_inserts, ctx, diags);
+        }
+        "math" => {
+            require_fields(task, &["input", "output_name"], diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
+        }
         "chat" => {
             require_fields(task, &["messages", "output_name"], diags);
+            require_array(task, "messages", default_inserts, ctx, diags);
+            require_string(task, "output_name", default_inserts, ctx, diags);
             validate_voice_path(task, ctx, diags);
         }
         "speak" => {
             require_fields(task, &["text", "voice_path"], diags);
+            require_string(task, "text", default_inserts, ctx, diags);
+            require_string(task, "voice_path", default_inserts, ctx, diags);
             validate_voice_path(task, ctx, diags);
         }
         _ => diags.push(diag(task, format!("Unknown cmd '{cmd}'"))),
     }
+
+    let goto_map_allows_null = cmd == "goto_map" && has_null_map_entry(task, "target_maps");
+    let replace_map_allows_null = cmd == "replace_map" && has_null_map_entry(task, "wildcard_maps");
 
     for (k, value) in task.iter() {
         if k == "tasks" {
@@ -250,7 +377,12 @@ fn validate_task(
         }
         for key in extract_insert_keys(value) {
             let is_numeric_capture = cmd == "replace_map" && key.chars().all(|c| c.is_ascii_digit());
+            let allows_null = (cmd == "goto_map" && k == "text" && goto_map_allows_null)
+                || (cmd == "replace_map" && k == "item" && replace_map_allows_null);
             if !is_possible_insert(&key, insert_keys) && !key.starts_with("ARG") && !is_numeric_capture {
+                if allows_null {
+                    continue;
+                }
                 diags.push(diag(
                     task,
                     format!("Interpolation key '{key}' will never be defined"),
@@ -258,6 +390,21 @@ fn validate_task(
             }
         }
     }
+}
+
+fn has_null_map_entry(task: &Task, field: &str) -> bool {
+    let Some(arr) = task.get(field).and_then(Value::as_array) else {
+        return false;
+    };
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        if obj.keys().any(|k| k == "NULL") {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_voice_path(task: &Task, ctx: &ProgramLoadContext, diags: &mut Vec<Diagnostic>) {
@@ -330,6 +477,128 @@ fn require_fields(task: &Task, fields: &[&str], diags: &mut Vec<Diagnostic>) {
             diags.push(diag(task, format!("Missing required field '{f}'")));
         }
     }
+}
+
+fn require_string(
+    task: &Task,
+    field: &str,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(v) = task.get(field) {
+        if v.is_string() {
+            if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+                if resolved.is_string() {
+                    return;
+                }
+                diags.push(diag(task, format!("Field '{field}' must be a string")));
+                return;
+            }
+            return;
+        }
+        diags.push(diag(task, format!("Field '{field}' must be a string")));
+    }
+}
+
+fn require_array(
+    task: &Task,
+    field: &str,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(v) = task.get(field) {
+        if v.is_array() {
+            return;
+        }
+        if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+            if resolved.is_array() {
+                return;
+            }
+            diags.push(diag(task, format!("Field '{field}' must be an array")));
+            return;
+        }
+        if is_simple_interpolation(v) {
+            return;
+        }
+        diags.push(diag(task, format!("Field '{field}' must be an array")));
+    }
+}
+
+fn require_object(
+    task: &Task,
+    field: &str,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(v) = task.get(field) {
+        if v.is_object() {
+            return;
+        }
+        if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+            if resolved.is_object() {
+                return;
+            }
+            diags.push(diag(task, format!("Field '{field}' must be an object")));
+            return;
+        }
+        if is_simple_interpolation(v) {
+            return;
+        }
+        diags.push(diag(task, format!("Field '{field}' must be an object")));
+    }
+}
+
+fn require_task_array(
+    task: &Task,
+    field: &str,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(v) = task.get(field) {
+        if let Some(arr) = v.as_array() {
+            if arr.iter().any(|t| t.as_object().is_none()) {
+                diags.push(diag(task, format!("Field '{field}' must be an array of objects")));
+            }
+            return;
+        }
+        if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+            if let Some(arr) = resolved.as_array() {
+                if arr.iter().any(|t| t.as_object().is_none()) {
+                    diags.push(diag(task, format!("Field '{field}' must be an array of objects")));
+                }
+                return;
+            }
+            diags.push(diag(task, format!("Field '{field}' must be an array of objects")));
+            return;
+        }
+        if is_simple_interpolation(v) {
+            return;
+        }
+        diags.push(diag(task, format!("Field '{field}' must be an array of objects")));
+    }
+}
+
+fn is_simple_interpolation(value: &Value) -> bool {
+    value
+        .as_str()
+        .and_then(|s| get_simple_insertkey(s))
+        .is_some()
+}
+
+fn resolve_simple_value(
+    value: &Value,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+) -> Option<Value> {
+    let key = value.as_str().and_then(get_simple_insertkey)?;
+    if key.starts_with("ARG") {
+        return None;
+    }
+    get_interpdata(default_inserts, &key, ctx).ok()
 }
 
 fn diag(task: &Task, message: String) -> Diagnostic {

@@ -47,10 +47,7 @@ Verified runs (agent-mode) in this session:
 
 ## Known Issues / Gaps
 - `--log` is parsed but unused in runtime (field exists in `RuntimeOptions` only).
-- Save slots: Rust UI exposes 1..=9, while README/Python mention up to 10.
-- Static analyzer is simpler than Python version; it catches missing fields/labels but is not as exhaustive.
-- README lists `join_list`, but the Python runtime and Rust runtime implement `list_join` (doc mismatch).
-- Chat examples are not validated yet, but local API access is available (see above).
+- Chat examples still not validated in this environment: local socket access for chat is blocked in agent-mode runs (see latest run attempt).
 
 ## Near-Term Plan
 1. **Finish compatibility testing**:
@@ -74,6 +71,7 @@ Verified runs (agent-mode) in this session:
 - random_choice: now errors on empty lists (matches Python behavior).
 - chat: parses `n_outputs`/`shown` string values, retries if fewer outputs than requested, strips `line`/`traceback_label` before API call.
 - Validation: `voice_path` is checked for literal paths during program analysis and at runtime before starting TTS.
+- Analyzer: added type checks for common fields (strings, arrays, task arrays) and stricter `goto_map`/`replace_map` shape validation.
 - Audio web: optional `--audio-web`/`--audio-port` serves a minimal page with streaming WAV audio; keepalive silence + reconnection; delays shutdown to finish playback.
 
 ## Commands I Use

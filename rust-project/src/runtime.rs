@@ -10,12 +10,16 @@ use crate::save::splice_key_into_json5;
 use crate::audio_web;
 use crate::ui::{start_ui, UiCommandHandle, UiEvent};
 use anyhow::{anyhow, Result};
+use chrono::{SecondsFormat, Utc};
 use rand::random;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -35,6 +39,54 @@ pub struct RuntimeOptions {
 #[derive(Clone)]
 struct State {
     data: Map<String, Value>,
+}
+
+struct Logger {
+    file: Option<StdMutex<std::fs::File>>,
+}
+
+impl Logger {
+    fn new(path: &Option<PathBuf>) -> Result<Self> {
+        let file = if let Some(path) = path {
+            Some(StdMutex::new(
+                OpenOptions::new().create(true).append(true).open(path)?,
+            ))
+        } else {
+            None
+        };
+        Ok(Self { file })
+    }
+
+    fn log(&self, event: &str, fields: Value) {
+        let file = match self.file.as_ref() {
+            Some(file) => file,
+            None => return,
+        };
+        let mut obj = Map::new();
+        obj.insert(
+            "ts".to_string(),
+            Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
+        );
+        obj.insert("event".to_string(), Value::String(event.to_string()));
+        match fields {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    obj.insert(k, v);
+                }
+            }
+            Value::Null => {}
+            other => {
+                obj.insert("data".to_string(), other);
+            }
+        }
+        let line = match serde_json::to_string(&Value::Object(obj)) {
+            Ok(line) => line,
+            Err(_) => return,
+        };
+        if let Ok(mut guard) = file.lock() {
+            let _ = writeln!(guard, "{}", line);
+        }
+    }
 }
 
 impl State {
@@ -95,6 +147,18 @@ pub async fn run_program(
         port: options.audio_port,
     });
     let state = Arc::new(Mutex::new(State::from_default(&program.default_state)));
+    let logger = Arc::new(Logger::new(&options.log_path)?);
+
+    logger.log(
+        "program_start",
+        json!({
+            "program": ctx.program_path.to_string_lossy(),
+            "order_len": program.order.len(),
+            "agent_mode": options.agent_mode,
+            "audio_web": options.audio_web,
+            "audio_port": options.audio_port,
+        }),
+    );
 
     {
         let mut st = state.lock().await;
@@ -150,18 +214,14 @@ pub async fn run_program(
                         program,
                         &state,
                         &mut completion_args,
-                        &named_tasks,
-                        &options,
                         ui,
                         &ctx,
+                        logger.clone(),
                     )
                     .await?;
                     match action {
                         MenuAction::Close => menu_open = false,
-                        MenuAction::Quit => {
-                            kill = true;
-                            break;
-                        }
+                        MenuAction::Quit => break,
                     }
                     continue;
                 } else {
@@ -186,6 +246,7 @@ pub async fn run_program(
                 io.clone(),
                 token.child_token(),
                 "root".to_string(),
+                logger.clone(),
             );
             let mut exec_fut = Box::pin(exec_fut);
 
@@ -283,6 +344,7 @@ pub async fn run_program(
 
     let output = state.lock().await.get_output();
     println!("{}", output.trim());
+    logger.log("program_end", json!({ "success": run_result.is_ok() }));
     run_result
 }
 
@@ -313,6 +375,7 @@ async fn execute_task(
     io: Io,
     token: CancellationToken,
     runtime_label: String,
+    logger: Arc<Logger>,
 ) -> Result<TaskOutcome> {
     if token.is_cancelled() {
         return Err(anyhow!("cancelled"));
@@ -328,6 +391,15 @@ async fn execute_task(
         .get("cmd")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Task missing cmd"))?;
+
+    logger.log(
+        "task_start",
+        json!({
+            "label": runtime_label,
+            "cmd": cmd,
+            "line": task.get("line").and_then(Value::as_i64),
+        }),
+    );
 
     match cmd {
         "list_join" => {
@@ -421,6 +493,14 @@ async fn execute_task(
                     .get(choice_index)
                     .ok_or_else(|| anyhow!("Choice index out of bounds"))?
                     .clone();
+                logger.log(
+                    "user_choice",
+                    json!({
+                        "output_name": output_name.clone(),
+                        "index": choice_index,
+                        "choice": value_to_string(&choice),
+                    }),
+                );
                 with_inserts(state, |ins| set_interpdata(ins, &output_name, choice)).await;
             }
         }
@@ -431,6 +511,13 @@ async fn execute_task(
             let escaped = input
                 .replace(INSERT_START, &format!("{ESCAPE}{INSERT_START}"))
                 .replace(INSERT_STOP, &format!("{ESCAPE}{INSERT_STOP}"));
+            logger.log(
+                "user_input",
+                json!({
+                    "output_name": output_name.clone(),
+                    "value": input,
+                }),
+            );
             with_inserts(state, |ins| {
                 set_interpdata(ins, &output_name, Value::String(escaped))
             })
@@ -463,6 +550,7 @@ async fn execute_task(
                 io.clone(),
                 token,
                 format!("{runtime_label}/{name}"),
+                logger.clone(),
             )
             .await;
         }
@@ -479,6 +567,7 @@ async fn execute_task(
                     io.clone(),
                     token.child_token(),
                     child_label,
+                    logger.clone(),
                 )
             });
             let results = futures::future::join_all(futures).await;
@@ -501,6 +590,7 @@ async fn execute_task(
                     io.clone(),
                     group.child_token(),
                     child_label,
+                    logger.clone(),
                 ));
             }
             if let Some(res) = futures.next().await {
@@ -531,6 +621,7 @@ async fn execute_task(
                     io.clone(),
                     token.child_token(),
                     child_label,
+                    logger.clone(),
                 )
                 .await?;
                 match result {
@@ -594,6 +685,7 @@ async fn execute_task(
                         io.clone(),
                         token.child_token(),
                         child_label,
+                        logger.clone(),
                     )
                     .await?;
                     match result {
@@ -654,6 +746,7 @@ async fn execute_task(
         "goto" => {
             let target = as_string(&task, "name")?;
             if target != "CONTINUE" {
+                logger.log("goto", json!({ "target": target.clone() }));
                 return Ok(TaskOutcome::Goto(target));
             }
         }
@@ -706,6 +799,14 @@ async fn execute_task(
                 }
             }
             let target = target.ok_or_else(|| anyhow!("goto_map has no matches for '{value_text}'"))?;
+            logger.log(
+                "goto_map",
+                json!({
+                    "value": value_text.clone(),
+                    "target": target.clone(),
+                    "interpolation_error": interp_error,
+                }),
+            );
             if target != "CONTINUE" {
                 return Ok(TaskOutcome::Goto(target));
             }
@@ -738,36 +839,70 @@ async fn execute_task(
             }
             let idx = random::<usize>() % list.len();
             let item = list.get(idx).cloned().unwrap_or(Value::Null);
+            logger.log(
+                "random_choice",
+                json!({
+                    "output_name": output_name.clone(),
+                    "index": idx,
+                    "choice": value_to_string(&item),
+                }),
+            );
             with_inserts(state, |ins| set_interpdata(ins, &output_name, item)).await;
         }
         "delete" => {
             let wildcards = as_array(&task, "wildcards")?;
+            let mut deleted = Vec::new();
             with_inserts(state, |ins| {
                 let keys: Vec<String> = ins.keys().cloned().collect();
                 for k in keys {
                     if wildcards.iter().any(|w| wildcard_match(&value_to_string(w), &k)) {
                         delete_interpdata(ins, &k);
+                        deleted.push(k);
                     }
                 }
             })
             .await;
+            logger.log(
+                "delete",
+                json!({
+                    "count": deleted.len(),
+                    "keys": deleted,
+                }),
+            );
         }
         "delete_except" => {
             let wildcards = as_array(&task, "wildcards")?;
+            let mut deleted = Vec::new();
             with_inserts(state, |ins| {
                 let keys: Vec<String> = ins.keys().cloned().collect();
                 for k in keys {
                     if !wildcards.iter().any(|w| wildcard_match(&value_to_string(w), &k)) {
                         delete_interpdata(ins, &k);
+                        deleted.push(k);
                     }
                 }
             })
             .await;
+            logger.log(
+                "delete_except",
+                json!({
+                    "count": deleted.len(),
+                    "keys": deleted,
+                }),
+            );
         }
         "math" => {
             let input = as_string(&task, "input")?;
             let output_name = as_string(&task, "output_name")?;
             let result = eval_math(&inserts_snapshot, &input, &ctx)?;
+            logger.log(
+                "math",
+                json!({
+                    "output_name": output_name.clone(),
+                    "input": input,
+                    "result": result,
+                }),
+            );
             with_inserts(state, |ins| {
                 set_interpdata(ins, &output_name, Value::Number(result.into()))
             })
@@ -790,13 +925,28 @@ async fn execute_task(
                 Value::Bool(b) => b.to_string(),
                 v => serde_json::to_string(&v)?,
             };
-            fs::write(&resolved, content)?;
+            let bytes = content.len();
+            fs::write(&resolved, &content)?;
+            logger.log(
+                "write",
+                json!({
+                    "path": resolved.to_string_lossy(),
+                    "bytes": bytes,
+                }),
+            );
         }
         "speak" => {
             let text = as_string(&task, "text")?;
             let voice_path = as_string(&task, "voice_path")?;
             let voice_path = resolve_path(&ctx, &voice_path);
             let voice_path_str = voice_path.to_string_lossy().to_string();
+            logger.log(
+                "speak",
+                json!({
+                    "voice_path": voice_path_str.clone(),
+                    "text_len": text.len(),
+                }),
+            );
             if text.is_empty() {
                 io.stop_tts().await?;
             } else {
@@ -881,6 +1031,13 @@ async fn execute_task(
             completion.remove("line");
             completion.remove("traceback_label");
 
+            logger.log(
+                "chat_start",
+                json!({
+                    "output_name": output_name.clone(),
+                    "messages": messages.len(),
+                }),
+            );
             let tts_writer = if let Some(path) = voice_path.clone() {
                 let resolved = resolve_path(&ctx, &path);
                 if !resolved.exists() {
@@ -946,7 +1103,9 @@ async fn execute_task(
                 guard.finish()?;
             }
 
-            if outputs.len() == 1 {
+            let outputs_len = outputs.len();
+            let visual_len = visual_output.len();
+            if outputs_len == 1 {
                 with_inserts(state.clone(), |ins| {
                     set_interpdata(ins, &output_name, Value::String(outputs[0].clone()))
                 })
@@ -958,6 +1117,14 @@ async fn execute_task(
                 .await;
             }
 
+            logger.log(
+                "chat_done",
+                json!({
+                    "output_name": output_name,
+                    "outputs": outputs_len,
+                    "visual_len": visual_len,
+                }),
+            );
             if !visual_output.is_empty() {
                 let mut st = state.lock().await;
                 let mut out = st.get_output();
@@ -1043,8 +1210,8 @@ fn eval_math_index(value: &Value, inserts: &Map<String, Value>, ctx: &ProgramLoa
 
 fn slice_indices(from: i64, to: i64, len: usize) -> Result<(usize, usize)> {
     let len_i = len as i64;
-    let mut start = if from > 0 { from - 1 } else { len_i + from };
-    let mut end = if to > 0 { to - 1 } else { len_i + to };
+    let start = if from > 0 { from - 1 } else { len_i + from };
+    let end = if to > 0 { to - 1 } else { len_i + to };
     if from == 0 {
         return Err(anyhow!("Lower slice index cannot be 0 (1-based)"));
     }
@@ -1077,11 +1244,7 @@ fn replace_map(
     ctx: &ProgramLoadContext,
     repeat_until_done: bool,
 ) -> Result<Value> {
-    let null_value = maps.iter().find_map(|m| {
-        m.as_object().and_then(|o| {
-            o.get("NULL").map(|v| v.clone())
-        })
-    });
+    let null_value = find_null_map_value(maps, inserts, ctx);
 
     fn replace_str(
         mut text: String,
@@ -1091,7 +1254,7 @@ fn replace_map(
         repeat_until_done: bool,
     ) -> Result<String> {
         loop {
-            let mut current = match interpolate_inserts(inserts, &text, ctx) {
+            let current = match interpolate_inserts(inserts, &text, ctx) {
                 Ok(v) => value_to_string(&v),
                 Err(e) => return Err(e),
             };
@@ -1120,7 +1283,15 @@ fn replace_map(
     }
 
     let result: Result<Value, anyhow::Error> = match item {
-        Value::String(s) => Ok(Value::String(replace_str(s, maps, inserts, ctx, repeat_until_done)?)),
+        Value::String(s) => {
+            if get_simple_insertkey(&s).is_some()
+                && interpolate_inserts(inserts, &s, ctx).is_err()
+                && null_value.is_some()
+            {
+                return Ok(null_value.unwrap());
+            }
+            Ok(Value::String(replace_str(s, maps, inserts, ctx, repeat_until_done)?))
+        }
         Value::Array(arr) => Ok(Value::Array(
             arr.into_iter()
                 .map(|v| replace_map(v, maps, inserts, ctx, repeat_until_done))
@@ -1148,6 +1319,27 @@ fn replace_map(
             }
         }
     }
+}
+
+fn find_null_map_value(maps: &[Value], inserts: &Map<String, Value>, ctx: &ProgramLoadContext) -> Option<Value> {
+    for map in maps {
+        let Some(obj) = map.as_object() else {
+            continue;
+        };
+        for (k, v) in obj {
+            if k == "NULL" {
+                return Some(v.clone());
+            }
+            if k.contains('{') {
+                if let Ok(key_val) = interpolate_inserts(inserts, k, ctx) {
+                    if value_to_string(&key_val) == "NULL" {
+                        return Some(v.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn wildcard_captures(pattern: &str, text: &str) -> Vec<String> {
@@ -1202,10 +1394,9 @@ async fn main_menu(
     program: &mut Program,
     state: &Arc<Mutex<State>>,
     completion_args: &mut Map<String, Value>,
-    named_tasks: &HashMap<String, Task>,
-    options: &RuntimeOptions,
     ui: &UiCommandHandle,
     ctx: &ProgramLoadContext,
+    logger: Arc<Logger>,
 ) -> Result<MenuAction> {
     let mut status = String::new();
     loop {
@@ -1260,13 +1451,20 @@ async fn main_menu(
                         return Err(e);
                     }
                 };
-                let mut st = state.lock().await;
+                let st = state.lock().await;
                 let mut saved = st.data.clone();
                 saved.insert("label".to_string(), Value::String(label.clone()));
                 program
                     .save_states
                     .insert((idx + 1).to_string(), Value::Object(saved));
                 save_program(program, ctx)?;
+                logger.log(
+                    "menu_save",
+                    json!({
+                        "slot": idx + 1,
+                        "label": label.clone(),
+                    }),
+                );
                 status = format!("Saved '{label}' to slot {}.", idx + 1);
                 continue;
             }
@@ -1293,12 +1491,19 @@ async fn main_menu(
                 }
                 let output = st.get_output();
                 ui.set_output(output);
+                logger.log(
+                    "menu_load",
+                    json!({
+                        "slot": idx + 1,
+                        "label": slots[idx].label.clone(),
+                    }),
+                );
                 status = format!("Loaded '{}'.", slots[idx].label);
                 continue;
             }
             2 => {
                 let mut load_ctx = ProgramLoadContext::new(ctx.program_path.clone(), ctx.inserts_dir.clone())?;
-                let mut new_program = crate::parser::load_program(&mut load_ctx)?;
+                let new_program = crate::parser::load_program(&mut load_ctx)?;
                 crate::analyzer::analyze_program(&new_program, &load_ctx)?;
                 let mut st = state.lock().await;
                 let args: HashMap<String, Value> = st
@@ -1320,10 +1525,14 @@ async fn main_menu(
                 program.completion_args = new_program.completion_args;
                 completion_args.clear();
                 completion_args.extend(program.completion_args.clone());
+                logger.log("menu_reload", json!({ "result": "reloaded" }));
                 status = "Restarted program after reloading.".to_string();
                 continue;
             }
-            3 => return Ok(MenuAction::Quit),
+            3 => {
+                logger.log("menu_quit", Value::Null);
+                return Ok(MenuAction::Quit);
+            }
             _ => {}
         }
         return Ok(MenuAction::Close);
