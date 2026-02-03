@@ -865,21 +865,31 @@ async fn execute_task(
             completion.remove("line");
             completion.remove("traceback_label");
 
-            let mut tts_writer = if let Some(path) = voice_path.clone() {
+            let tts_writer = if let Some(path) = voice_path.clone() {
                 let resolved = resolve_path(&ctx, &path);
-                Some(io.start_tts_stream(&resolved.to_string_lossy(), voice_speaker).await?)
+                if !resolved.exists() {
+                    return Err(anyhow!("voice_path does not exist: {}", resolved.display()));
+                }
+                if resolved.is_dir() {
+                    return Err(anyhow!("voice_path is a directory, expected a file: {}", resolved.display()));
+                }
+                Some(Arc::new(std::sync::Mutex::new(
+                    io.start_tts_stream(&resolved.to_string_lossy(), voice_speaker).await?,
+                )))
             } else {
                 None
             };
             let io_clone = io.clone();
+            let tts_clone = tts_writer.clone();
             let mut on_text = move |text: &str| -> Result<()> {
                 let io2 = io_clone.clone();
                 let text_owned = text.to_string();
                 tokio::spawn(async move {
                     io2.write(text_owned).await;
                 });
-                if let Some(writer) = tts_writer.as_mut() {
-                    writer.write(text)?;
+                if let Some(writer) = tts_clone.as_ref() {
+                    let mut guard = writer.lock().map_err(|_| anyhow!("TTS writer lock poisoned"))?;
+                    guard.write(text)?;
                 }
                 Ok(())
             };
@@ -914,6 +924,11 @@ async fn execute_task(
                 }
                 break (outputs, visual_output);
             };
+
+            if let Some(writer) = tts_writer.as_ref() {
+                let mut guard = writer.lock().map_err(|_| anyhow!("TTS writer lock poisoned"))?;
+                guard.finish()?;
+            }
 
             if outputs.len() == 1 {
                 with_inserts(state.clone(), |ins| {
@@ -1520,6 +1535,7 @@ impl AgentIo {
 
 struct TtsWriter {
     child: Option<std::process::Child>,
+    buffer: String,
 }
 
 impl TtsWriter {
@@ -1589,20 +1605,75 @@ impl TtsWriter {
             .arg("-")
             .stdin(piper_out);
         let _ = pw.spawn();
-        Ok(Self { child: Some(child) })
+        Ok(Self {
+            child: Some(child),
+            buffer: String::new(),
+        })
     }
 
     fn noop() -> Self {
-        Self { child: None }
+        Self {
+            child: None,
+            buffer: String::new(),
+        }
     }
 
     fn write(&mut self, text: &str) -> Result<()> {
+        self.buffer.push_str(text);
+        self.flush_buffer(false)?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.flush_buffer(true)
+    }
+
+    fn flush_buffer(&mut self, force: bool) -> Result<()> {
         if let Some(child) = &mut self.child {
             if let Some(stdin) = &mut child.stdin {
                 use std::io::Write;
-                stdin.write_all(text.as_bytes())?;
+                while let Some(idx) = self.buffer.find('\n') {
+                    let line = self.buffer[..idx].trim();
+                    if !line.is_empty() {
+                        stdin.write_all(line.as_bytes())?;
+                        stdin.write_all(b"\n")?;
+                        stdin.flush()?;
+                    }
+                    self.buffer = self.buffer[idx + 1..].to_string();
+                }
+
+                if force {
+                    let line = self.buffer.trim();
+                    if !line.is_empty() {
+                        stdin.write_all(line.as_bytes())?;
+                        stdin.write_all(b"\n")?;
+                        stdin.flush()?;
+                    }
+                    self.buffer.clear();
+                    return Ok(());
+                }
+
+                if let Some(idx) = last_sentence_end(&self.buffer) {
+                    let line = self.buffer[..idx].trim();
+                    if !line.is_empty() {
+                        stdin.write_all(line.as_bytes())?;
+                        stdin.write_all(b"\n")?;
+                        stdin.flush()?;
+                    }
+                    self.buffer = self.buffer[idx..].to_string();
+                }
             }
         }
         Ok(())
     }
+}
+
+fn last_sentence_end(text: &str) -> Option<usize> {
+    let mut last = None;
+    for (i, ch) in text.char_indices() {
+        if ch == '.' || ch == '!' || ch == '?' {
+            last = Some(i + ch.len_utf8());
+        }
+    }
+    last
 }

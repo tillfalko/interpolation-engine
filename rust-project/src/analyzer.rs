@@ -3,6 +3,7 @@ use crate::model::{Program, ProgramLoadContext, Task};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Diagnostic {
@@ -28,6 +29,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
         &named,
         &insert_keys,
         &global_labels,
+        ctx,
         &mut diags,
     );
 
@@ -38,6 +40,7 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
             &named,
             &insert_keys,
             &global_labels,
+            ctx,
             &mut diags,
         );
     }
@@ -106,10 +109,11 @@ fn analyze_task_list(
     named_tasks: &HashSet<String>,
     insert_keys: &HashSet<String>,
     global_labels: &HashSet<String>,
+    ctx: &ProgramLoadContext,
     diags: &mut Vec<Diagnostic>,
 ) {
     for task in tasks {
-        validate_task(task, scope_name, named_tasks, insert_keys, global_labels, diags);
+        validate_task(task, scope_name, named_tasks, insert_keys, global_labels, ctx, diags);
         if let Some(subtasks) = task.get("tasks").and_then(Value::as_array) {
             let subtasks = subtasks
                 .iter()
@@ -122,6 +126,7 @@ fn analyze_task_list(
                     named_tasks,
                     insert_keys,
                     global_labels,
+                    ctx,
                     diags,
                 );
             }
@@ -135,6 +140,7 @@ fn validate_task(
     named_tasks: &HashSet<String>,
     insert_keys: &HashSet<String>,
     labels: &HashSet<String>,
+    ctx: &ProgramLoadContext,
     diags: &mut Vec<Diagnostic>,
 ) {
     let cmd = match task.get("cmd").and_then(Value::as_str) {
@@ -215,8 +221,14 @@ fn validate_task(
         }
         "delete" | "delete_except" => require_fields(task, &["wildcards"], diags),
         "math" => require_fields(task, &["input", "output_name"], diags),
-        "chat" => require_fields(task, &["messages", "output_name"], diags),
-        "speak" => require_fields(task, &["text", "voice_path"], diags),
+        "chat" => {
+            require_fields(task, &["messages", "output_name"], diags);
+            validate_voice_path(task, ctx, diags);
+        }
+        "speak" => {
+            require_fields(task, &["text", "voice_path"], diags);
+            validate_voice_path(task, ctx, diags);
+        }
         _ => diags.push(diag(task, format!("Unknown cmd '{cmd}'"))),
     }
 
@@ -245,6 +257,40 @@ fn validate_task(
                 ));
             }
         }
+    }
+}
+
+fn validate_voice_path(task: &Task, ctx: &ProgramLoadContext, diags: &mut Vec<Diagnostic>) {
+    let path = match task.get("voice_path").and_then(Value::as_str) {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    if path.contains('{') || path.contains('}') {
+        return;
+    }
+    let resolved = resolve_path_ctx(ctx, path);
+    if !resolved.exists() {
+        diags.push(diag(
+            task,
+            format!("voice_path does not exist: {}", resolved.display()),
+        ));
+        return;
+    }
+    if resolved.is_dir() {
+        diags.push(diag(
+            task,
+            format!("voice_path is a directory: {}", resolved.display()),
+        ));
+    }
+}
+
+fn resolve_path_ctx(ctx: &ProgramLoadContext, path: &str) -> PathBuf {
+    let expanded = shellexpand::tilde(path).to_string();
+    let p = PathBuf::from(expanded);
+    if p.is_absolute() {
+        p
+    } else {
+        ctx.program_dir.join(p)
     }
 }
 
