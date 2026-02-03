@@ -1552,7 +1552,6 @@ impl AgentIo {
 struct TtsWriter {
     child: Option<std::process::Child>,
     buffer: String,
-    web: Option<audio_web::AudioBroadcaster>,
     _reader: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -1610,7 +1609,6 @@ impl TtsWriter {
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
         let mut child = cmd.spawn()?;
-        let mut web = None;
         let mut reader = None;
         if audio_web::config().enabled {
             let broadcaster = audio_web::get_or_start(rate as u32, channels as u16)?;
@@ -1627,7 +1625,6 @@ impl TtsWriter {
                         }
                     }
                 }));
-                web = Some(broadcaster);
             }
         } else {
             let piper_out = child
@@ -1649,7 +1646,6 @@ impl TtsWriter {
         Ok(Self {
             child: Some(child),
             buffer: String::new(),
-            web,
             _reader: reader,
         })
     }
@@ -1658,7 +1654,6 @@ impl TtsWriter {
         Self {
             child: None,
             buffer: String::new(),
-            web: None,
             _reader: None,
         }
     }

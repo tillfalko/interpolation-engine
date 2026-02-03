@@ -121,6 +121,7 @@ enum Mode {
     Input {
         prompt_inline: String,
         buffer: String,
+        cursor: usize,
         allow_menu_toggle: bool,
         respond_to: Option<oneshot::Sender<String>>,
     },
@@ -150,6 +151,7 @@ struct UiState {
     history: Vec<String>,
     history_cursor: Option<usize>,
     history_stash: Option<String>,
+    dirty: bool,
 }
 
 fn spawn_ui_thread(
@@ -167,6 +169,7 @@ fn spawn_ui_thread(
             history: Vec::new(),
             history_cursor: None,
             history_stash: None,
+            dirty: true,
         };
         if let Some(path) = &state.history_path {
             state.history = load_history(path);
@@ -180,35 +183,49 @@ fn spawn_ui_thread(
                     cleanup_terminal(terminal.take());
                     return;
                 }
-                handle_command(cmd, &mut state);
+                if handle_command(cmd, &mut state) {
+                    state.dirty = true;
+                }
             }
 
             if event::poll(Duration::from_millis(10)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
-                    if handle_key(key, &mut state, &event_tx) {
+                    let (quit, changed) = handle_key(key, &mut state, &event_tx);
+                    if changed {
+                        state.dirty = true;
+                    }
+                    if quit {
                         cleanup_terminal(terminal.take());
                         return;
                     }
             }
             }
 
-            if last_draw.elapsed() > Duration::from_millis(16) {
+            if state.dirty || last_draw.elapsed() > Duration::from_millis(200) {
                 if let Some(term) = terminal.as_mut() {
                     let _ = draw(term, &state);
                 }
                 last_draw = Instant::now();
+                state.dirty = false;
             }
         }
     })
 }
 
-fn handle_command(cmd: UiCommand, state: &mut UiState) {
+fn handle_command(cmd: UiCommand, state: &mut UiState) -> bool {
     match cmd {
-        UiCommand::Write(text) => state.output.push_str(&text),
+        UiCommand::Write(text) => {
+            state.output.push_str(&text);
+            true
+        }
         UiCommand::Clear => {
             state.output.clear();
+            true
         }
-        UiCommand::SetOutput(text) => state.output = text,
+        UiCommand::SetOutput(text) => {
+            state.output = text;
+            true
+        }
         UiCommand::BeginInput {
             prompt,
             default,
@@ -216,15 +233,18 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
             respond_to,
         } => {
             let (outline, inline) = split_prompt(&prompt);
+            let cursor = default.len();
             state.info = outline;
             state.mode = Mode::Input {
                 prompt_inline: inline,
                 buffer: default,
+                cursor,
                 allow_menu_toggle,
                 respond_to: Some(respond_to),
             };
             state.history_cursor = None;
             state.history_stash = None;
+            true
         }
         UiCommand::BeginChoice {
             options,
@@ -240,43 +260,47 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) {
                 allow_menu_toggle,
                 respond_to: Some(respond_to),
             };
+            true
         }
         UiCommand::CancelInput => {
             match &mut state.mode {
                 Mode::Input { .. } | Mode::Search { .. } | Mode::Choice { .. } => {
                     state.mode = Mode::Idle;
+                    true
                 }
-                _ => {}
+                _ => false,
             }
         }
-        UiCommand::Shutdown => {}
+        UiCommand::Shutdown => false,
     }
 }
 
-fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiEvent>) -> bool {
+fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiEvent>) -> (bool, bool) {
     if key.code == KeyCode::Esc {
         match &state.mode {
             Mode::Input { allow_menu_toggle: false, .. }
             | Mode::Choice { allow_menu_toggle: false, .. } => {
                 state.mode = Mode::Idle;
-                return false;
+                return (false, true);
             }
             _ => {
                 let _ = event_tx.send(UiEvent::ToggleMenu);
                 state.mode = Mode::Idle;
-                return false;
+                return (false, true);
             }
         }
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         let _ = event_tx.send(UiEvent::Quit);
-        return true;
+        return (true, true);
     }
 
+    let mut changed = false;
     match &mut state.mode {
         Mode::Input {
             prompt_inline: _,
             buffer,
+            cursor,
             respond_to,
             ..
         } => match key.code {
@@ -289,12 +313,22 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                     let _ = tx.send(text);
                 }
                 state.mode = Mode::Idle;
+                changed = true;
             }
             KeyCode::Backspace => {
-                buffer.pop();
+                let new_cursor = prev_char_index(buffer, *cursor);
+                if new_cursor < *cursor {
+                    buffer.replace_range(new_cursor..*cursor, "");
+                    *cursor = new_cursor;
+                }
+                state.history_cursor = None;
+                changed = true;
             }
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                buffer.push('\n');
+                buffer.insert(*cursor, '\n');
+                *cursor += 1;
+                state.history_cursor = None;
+                changed = true;
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let original = buffer.clone();
@@ -304,7 +338,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                     }
                     other => {
                         state.mode = other;
-                        return false;
+                        return (false, false);
                     }
                 };
                 let match_index = find_history_match(&state.history, "", None);
@@ -318,10 +352,11 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                     original,
                     match_index,
                 };
+                changed = true;
             }
             KeyCode::Up => {
                 if state.history.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 let idx = match state.history_cursor {
                     None => {
@@ -332,30 +367,93 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                 };
                 if let Some(entry) = state.history.get(idx).cloned() {
                     *buffer = entry;
+                    *cursor = buffer.len();
                     state.history_cursor = Some(idx);
                 }
+                changed = true;
             }
             KeyCode::Down => {
                 if state.history.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 if let Some(i) = state.history_cursor {
                     if i + 1 < state.history.len() {
                         let idx = i + 1;
                         if let Some(entry) = state.history.get(idx).cloned() {
                             *buffer = entry;
+                            *cursor = buffer.len();
                             state.history_cursor = Some(idx);
                         }
                     } else {
                         state.history_cursor = None;
                         if let Some(stash) = state.history_stash.take() {
                             *buffer = stash;
+                            *cursor = buffer.len();
                         }
                     }
                 }
+                changed = true;
+            }
+            KeyCode::Left => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    *cursor = prev_word_index(buffer, *cursor);
+                } else {
+                    *cursor = prev_char_index(buffer, *cursor);
+                }
+                state.history_cursor = None;
+                changed = true;
+            }
+            KeyCode::Right => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    *cursor = next_word_index(buffer, *cursor);
+                } else {
+                    *cursor = next_char_index(buffer, *cursor);
+                }
+                state.history_cursor = None;
+                changed = true;
+            }
+            KeyCode::Home => {
+                *cursor = 0;
+                state.history_cursor = None;
+                changed = true;
+            }
+            KeyCode::End => {
+                *cursor = buffer.len();
+                state.history_cursor = None;
+                changed = true;
+            }
+            KeyCode::Delete => {
+                let next = next_char_index(buffer, *cursor);
+                if next > *cursor {
+                    buffer.replace_range(*cursor..next, "");
+                    state.history_cursor = None;
+                    changed = true;
+                }
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                *cursor = 0;
+                state.history_cursor = None;
+                changed = true;
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                *cursor = buffer.len();
+                state.history_cursor = None;
+                changed = true;
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let new_cursor = prev_word_index(buffer, *cursor);
+                if new_cursor < *cursor {
+                    buffer.replace_range(new_cursor..*cursor, "");
+                    *cursor = new_cursor;
+                }
+                state.history_cursor = None;
+                changed = true;
             }
             KeyCode::Char(c) => {
-                buffer.push(c);
+                buffer.insert(*cursor, c);
+                *cursor += c.len_utf8();
+                state.history_cursor = None;
+                changed = true;
             }
             _ => {}
         },
@@ -373,25 +471,30 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                 } => (prompt_inline, buffer, allow_menu_toggle, respond_to, query, original, match_index),
                 other => {
                     state.mode = other;
-                    return false;
+                    return (false, false);
                 }
             };
             match key.code {
                 KeyCode::Esc => {
+                    let cursor = m.5.len();
                     state.mode = Mode::Input {
                         prompt_inline: m.0,
                         buffer: m.5,
+                        cursor,
                         allow_menu_toggle: m.2,
                         respond_to: m.3,
                     };
+                    changed = true;
                 }
                 KeyCode::Enter => {
                     state.mode = Mode::Input {
                         prompt_inline: m.0,
-                        buffer: m.1,
+                        buffer: m.1.clone(),
+                        cursor: m.1.len(),
                         allow_menu_toggle: m.2,
                         respond_to: m.3,
                     };
+                    changed = true;
                 }
                 KeyCode::Backspace => {
                     m.4.pop();
@@ -412,6 +515,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                         original: m.5,
                         match_index: m.6,
                     };
+                    changed = true;
                 }
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     let start = m.6.and_then(|i| i.checked_sub(1));
@@ -430,6 +534,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                         original: m.5,
                         match_index: m.6,
                     };
+                    changed = true;
                 }
                 KeyCode::Char(c) => {
                     m.4.push(c);
@@ -450,6 +555,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                         original: m.5,
                         match_index: m.6,
                     };
+                    changed = true;
                 }
                 _ => {
                     state.mode = Mode::Search {
@@ -475,7 +581,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                     let _ = tx.send(0);
                 }
                 state.mode = Mode::Idle;
-                return false;
+                return (false, true);
             }
             if let KeyCode::Char(c) = key.code {
                 let key_str = c.to_string();
@@ -484,12 +590,14 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                         let _ = tx.send(idx);
                     }
                     state.mode = Mode::Idle;
+                    changed = true;
                 } else {
                     if let Some(idx) = options.iter().position(|o| o == &key_str) {
                         if let Some(tx) = respond_to.take() {
                             let _ = tx.send(idx);
                         }
                         state.mode = Mode::Idle;
+                        changed = true;
                     }
                 }
             }
@@ -497,7 +605,7 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
         Mode::Idle => {}
     }
 
-    false
+    (false, changed)
 }
 
 fn append_history(path: &PathBuf, text: &str) -> io::Result<()> {
@@ -568,10 +676,17 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
             _ => String::new(),
         };
 
-        let prompt_text = match &state.mode {
-            Mode::Input { prompt_inline, buffer, .. } => format!("{prompt_inline}{buffer}"),
-            Mode::Search { prompt_inline, buffer, .. } => format!("{prompt_inline}{buffer}"),
-            _ => String::new(),
+        let (prompt_text, cursor_text) = match &state.mode {
+            Mode::Input { prompt_inline, buffer, cursor, .. } => {
+                let c = (*cursor).min(buffer.len());
+                let cursor_slice = &buffer[..c];
+                (
+                    format!("{prompt_inline}{buffer}"),
+                    Some(format!("{prompt_inline}{cursor_slice}")),
+                )
+            }
+            Mode::Search { prompt_inline, buffer, .. } => (format!("{prompt_inline}{buffer}"), None),
+            _ => (String::new(), None),
         };
 
         let width = size.width as usize;
@@ -625,7 +740,8 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
         match &state.mode {
             Mode::Input { .. } => {
                 if width > 0 && prompt_height > 0 {
-                    let (row, col) = cursor_offset(&prompt_text, width);
+                    let cursor_ref = cursor_text.as_deref().unwrap_or(&prompt_text);
+                    let (row, col) = cursor_offset(cursor_ref, width);
                     let x = chunks[2].x.saturating_add(col as u16);
                     let y = chunks[2].y.saturating_add(row as u16);
                     f.set_cursor(x, y);
@@ -696,6 +812,97 @@ fn cursor_offset(text: &str, width: usize) -> (usize, usize) {
         }
     }
     (row, col)
+}
+
+fn prev_char_index(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let mut prev = 0;
+    for (i, _) in text.char_indices() {
+        if i >= cursor {
+            break;
+        }
+        prev = i;
+    }
+    prev
+}
+
+fn next_char_index(text: &str, cursor: usize) -> usize {
+    for (i, _) in text.char_indices() {
+        if i > cursor {
+            return i;
+        }
+    }
+    text.len()
+}
+
+fn prev_word_index(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let mut i = cursor;
+    while i > 0 {
+        let p = prev_char_index(text, i);
+        if !char_at(text, p).is_whitespace() {
+            break;
+        }
+        i = p;
+    }
+    if i == 0 {
+        return 0;
+    }
+    let p = prev_char_index(text, i);
+    let word = is_word_char(char_at(text, p));
+    while i > 0 {
+        let prev = prev_char_index(text, i);
+        let ch = char_at(text, prev);
+        if word && !is_word_char(ch) {
+            break;
+        }
+        if !word && ch.is_whitespace() {
+            break;
+        }
+        i = prev;
+    }
+    i
+}
+
+fn next_word_index(text: &str, cursor: usize) -> usize {
+    let mut i = cursor;
+    if i >= text.len() {
+        return text.len();
+    }
+    while i < text.len() {
+        let ch = char_at(text, i);
+        if !ch.is_whitespace() {
+            break;
+        }
+        i = next_char_index(text, i);
+    }
+    if i >= text.len() {
+        return text.len();
+    }
+    let word = is_word_char(char_at(text, i));
+    while i < text.len() {
+        let ch = char_at(text, i);
+        if word && !is_word_char(ch) {
+            break;
+        }
+        if !word && ch.is_whitespace() {
+            break;
+        }
+        i = next_char_index(text, i);
+    }
+    i
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn char_at(text: &str, idx: usize) -> char {
+    text[idx..].chars().next().unwrap_or('\0')
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {

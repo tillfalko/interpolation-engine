@@ -68,10 +68,13 @@ Verified runs (agent-mode) in this session:
 - TUI: user_choice options now render fully; choice text is bottom-aligned like user_input.
 - Main menu: Esc open/close stable, save/load/restart keeps menu open to display status messages.
 - Input history: `--history` now records inputs; Up/Down navigation and Ctrl-R reverse search supported (multi-line entries preserved).
+- Input editing: cursor-aware line editing with Ctrl-A/E, Ctrl-W, Ctrl-Left/Right, Home/End/Delete, and mid-line insert.
+- Input latency: UI redraws only on change (dirty flag), reducing typing lag.
 - list_slice: supports `to_index == 0` and returns empty list when `to_index < from_index`.
 - random_choice: now errors on empty lists (matches Python behavior).
 - chat: parses `n_outputs`/`shown` string values, retries if fewer outputs than requested, strips `line`/`traceback_label` before API call.
 - Validation: `voice_path` is checked for literal paths during program analysis and at runtime before starting TTS.
+- Audio web: optional `--audio-web`/`--audio-port` serves a minimal page with streaming WAV audio; keepalive silence + reconnection; delays shutdown to finish playback.
 
 ## Commands I Use
 - Build: `cargo build` (from `rust-project/`)
