@@ -621,11 +621,13 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
             ..
         } => {
             if options.is_empty() {
-                if let Some(tx) = respond_to.take() {
-                    let _ = tx.send(0);
+                match key.code {
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                        changed = scroll_output_key(key.code, state);
+                    }
+                    _ => {}
                 }
-                state.mode = Mode::Idle;
-                return (false, true);
+                return (false, changed);
             }
             match key.code {
                 KeyCode::Char(c) => {

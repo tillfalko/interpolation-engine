@@ -88,9 +88,15 @@ Expected if the server is reachable but the model name is invalid:
 - chat: parses `n_outputs`/`shown` string values, retries if fewer outputs than requested, strips `line`/`traceback_label` before API call, treats empty `voice_path` as disabled.
 - Validation: `voice_path` is checked for literal paths during program analysis and at runtime before starting TTS.
 - Analyzer: added type checks for common fields (strings, arrays, task arrays), simple-interpolation type resolution using default inserts, and stricter `goto_map`/`replace_map` shape validation.
-- Logging: `--log` now writes structured JSONL with task, input, and menu events.
+- Logging: `--log` writes human-readable text (task previews, chat transcripts, for-loop iteration detail).
+- Fix: `user_choice` with an empty list now blocks and can be cancelled, so `parallel_race` no longer cancels generation immediately (e.g. `examples/text_adventure.json5`).
+- Fix: `parallel_race` now clears `order_index/{runtime_label}` for interrupted tasks (like Python), preventing serial tasks from resuming mid-way and skipping chat on the next loop.
+- Fix: `chat` now merges `extra_body` into the top-level request (grammar enforcement works like Python), avoiding missing `<output>` tags and zero-output retries.
 - Audio web: optional `--audio-web`/`--audio-port` serves a minimal page with streaming WAV audio; keepalive silence + reconnection; delays shutdown to finish playback.
 
 ## Commands I Use
 - Build: `cargo build` (from `rust-project/`)
 - Run (agent mode): `./target/debug/interpolation-engine --agent-mode ../examples/hello_world.json5`
+
+## Workflow Note
+Always build your changes before asking for feedback.

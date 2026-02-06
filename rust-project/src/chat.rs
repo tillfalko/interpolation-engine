@@ -20,10 +20,16 @@ pub struct ChatArgs {
     pub api_key: String,
 }
 
+pub struct ChatResult {
+    pub outputs: Vec<String>,
+    pub visual_output: String,
+    pub raw: String,
+}
+
 pub async fn run_chat(
     args: ChatArgs,
     mut on_text: Option<&mut dyn FnMut(&str) -> Result<()>>,
-) -> Result<(Vec<String>, String)> {
+) -> Result<ChatResult> {
     if (!args.start_str.is_empty()) ^ (!args.stop_str.is_empty()) {
         return Err(anyhow!(
             "You can either set both start_str and stop_str or none."
@@ -43,7 +49,9 @@ pub async fn run_chat(
     request.insert("stream".to_string(), Value::Bool(true));
 
     if !args.extra_body.is_empty() {
-        request.insert("extra_body".to_string(), Value::Object(args.extra_body.clone()));
+        for (k, v) in args.extra_body.iter() {
+            request.insert(k.clone(), v.clone());
+        }
     }
 
     if request.contains_key("max_completion_tokens") {
@@ -143,11 +151,19 @@ pub async fn run_chat(
             .get("choice")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("Choice schema response missing 'choice'"))?;
-        return Ok((vec![choice.to_string()], visual_output));
+        return Ok(ChatResult {
+            outputs: vec![choice.to_string()],
+            visual_output,
+            raw,
+        });
     }
 
     let outputs = output_filter.outputs().into_iter().map(|o| o.trim().to_string()).collect();
-    Ok((outputs, visual_output))
+    Ok(ChatResult {
+        outputs,
+        visual_output,
+        raw,
+    })
 }
 
 fn normalize_api_url(api_url: &str) -> String {

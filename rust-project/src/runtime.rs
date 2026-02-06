@@ -1,4 +1,4 @@
-use crate::chat::{run_chat, ChatArgs};
+use crate::chat::{run_chat, ChatArgs, ChatResult};
 use async_recursion::async_recursion;
 use crate::interp::{
     delete_interpdata, get_interpdata, get_simple_insertkey, interpolate_inserts, recursive_interpolate,
@@ -23,6 +23,7 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use futures::stream::{FuturesUnordered, StreamExt};
+use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -62,30 +63,314 @@ impl Logger {
             Some(file) => file,
             None => return,
         };
-        let mut obj = Map::new();
-        obj.insert(
-            "ts".to_string(),
-            Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
-        );
-        obj.insert("event".to_string(), Value::String(event.to_string()));
-        match fields {
-            Value::Object(map) => {
-                for (k, v) in map {
-                    obj.insert(k, v);
-                }
-            }
-            Value::Null => {}
+        let map = match fields {
+            Value::Object(map) => map,
+            Value::Null => Map::new(),
             other => {
-                obj.insert("data".to_string(), other);
+                let mut map = Map::new();
+                map.insert("data".to_string(), other);
+                map
             }
-        }
-        let line = match serde_json::to_string(&Value::Object(obj)) {
-            Ok(line) => line,
-            Err(_) => return,
+        };
+        let ts = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let Some(text) = format_pretty_event(event, &map, &ts) else {
+            return;
         };
         if let Ok(mut guard) = file.lock() {
-            let _ = writeln!(guard, "{}", line);
+            let _ = writeln!(guard, "{}", text);
+            let _ = guard.flush();
         }
+    }
+}
+
+const PREVIEW_SHORT: usize = 80;
+const PREVIEW_LONG: usize = 140;
+
+fn format_pretty_event(event: &str, fields: &Map<String, Value>, ts: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    match event {
+        "program_start" => {
+            let program = map_string(fields, "program").unwrap_or_default();
+            let order_len = map_i64(fields, "order_len").unwrap_or(0);
+            let agent_mode = map_bool(fields, "agent_mode").unwrap_or(false);
+            let audio_web = map_bool(fields, "audio_web").unwrap_or(false);
+            let audio_port = map_i64(fields, "audio_port").unwrap_or(0);
+            lines.push(format!(
+                "[{ts}] Program start: {program} (order_len={order_len}, agent_mode={agent_mode}, audio_web={audio_web}, audio_port={audio_port})"
+            ));
+        }
+        "program_complete" => {
+            lines.push(format!("[{ts}] Reached end of order list."));
+        }
+        "program_terminated" => {
+            lines.push(format!("[{ts}] Terminated by user."));
+        }
+        "program_end" => {
+            let success = map_bool(fields, "success").unwrap_or(true);
+            if !success {
+                lines.push(format!("[{ts}] Program ended with error."));
+            }
+        }
+        "task_start" => {
+            let label = map_string(fields, "label")
+                .or_else(|| map_string(fields, "runtime_label"))
+                .unwrap_or_else(|| "task".to_string());
+            let preview = map_string(fields, "preview").unwrap_or_default();
+            if preview.is_empty() {
+                lines.push(format!("[{ts}] Order Item {label}."));
+            } else {
+                lines.push(format!("[{ts}] Order Item {label}: {preview}"));
+            }
+        }
+        "user_input" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let value = map_value(fields, "value")
+                .map(|v| preview_value(v, PREVIEW_SHORT))
+                .unwrap_or_else(|| "\"\"".to_string());
+            if output_name.is_empty() {
+                lines.push(format!("[{ts}] User entered {value}."));
+            } else {
+                lines.push(format!("[{ts}] User entered {value} -> {output_name}."));
+            }
+        }
+        "user_choice" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let choice = map_value(fields, "choice")
+                .map(|v| preview_value(v, PREVIEW_SHORT))
+                .unwrap_or_else(|| "\"\"".to_string());
+            let index = map_i64(fields, "index").unwrap_or(-1);
+            if output_name.is_empty() {
+                lines.push(format!("[{ts}] User selected {choice} (index {index})."));
+            } else {
+                lines.push(format!("[{ts}] User selected {choice} (index {index}) -> {output_name}."));
+            }
+        }
+        "random_choice" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let choice = map_value(fields, "choice")
+                .map(|v| preview_value(v, PREVIEW_SHORT))
+                .unwrap_or_else(|| "\"\"".to_string());
+            let index = map_i64(fields, "index").unwrap_or(-1);
+            if output_name.is_empty() {
+                lines.push(format!("[{ts}] Random choice {choice} (index {index})."));
+            } else {
+                lines.push(format!("[{ts}] Random choice {choice} (index {index}) -> {output_name}."));
+            }
+        }
+        "goto" => {
+            let target = map_string(fields, "target").unwrap_or_default();
+            lines.push(format!("[{ts}] goto -> {target}."));
+        }
+        "goto_map" => {
+            let target = map_string(fields, "target").unwrap_or_default();
+            let value = map_string(fields, "value").unwrap_or_default();
+            let interp_error = map_bool(fields, "interpolation_error").unwrap_or(false);
+            if interp_error {
+                lines.push(format!(
+                    "[{ts}] goto_map value could not be resolved (NULL), proceeding to {target}."
+                ));
+            } else {
+                lines.push(format!(
+                    "[{ts}] goto_map value is {value}, proceeding to {target}."
+                ));
+            }
+        }
+        "replace_map" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let repeat = map_bool(fields, "repeat_until_done").unwrap_or(false);
+            let maps = map_i64(fields, "maps").unwrap_or(0);
+            let item = map_string(fields, "item_preview").unwrap_or_default();
+            if item.is_empty() {
+                lines.push(format!(
+                    "[{ts}] replace_map -> {output_name} (repeat_until_done={repeat}, maps={maps})."
+                ));
+            } else {
+                lines.push(format!(
+                    "[{ts}] replace_map -> {output_name} (repeat_until_done={repeat}, maps={maps}, item={item})."
+                ));
+            }
+        }
+        "for_iteration" => {
+            let iteration = map_i64(fields, "iteration").unwrap_or(0);
+            lines.push(format!("[{ts}] For loop starting iteration {iteration}."));
+            if let Some(items) = fields.get("items").and_then(Value::as_object) {
+                for (name, value) in items {
+                    let preview = preview_value(value, PREVIEW_SHORT);
+                    lines.push(format!("  For loop: {name} set to {preview}."));
+                }
+            }
+        }
+        "delete" | "delete_except" => {
+            let count = map_i64(fields, "count").unwrap_or(0);
+            let keys = fields
+                .get("keys")
+                .map(|v| preview_value(v, PREVIEW_LONG))
+                .unwrap_or_default();
+            if keys.is_empty() {
+                lines.push(format!("[{ts}] {event}: {count} keys."));
+            } else {
+                lines.push(format!("[{ts}] {event}: {count} keys {keys}."));
+            }
+        }
+        "math" => {
+            let input = map_string(fields, "input").unwrap_or_default();
+            let expression = map_string(fields, "expression").unwrap_or_default();
+            let result = map_string(fields, "result").unwrap_or_default();
+            if !expression.is_empty() && expression != input {
+                lines.push(format!("[{ts}] Math: {input} => {expression} => {result}."));
+            } else {
+                lines.push(format!("[{ts}] Math: {input} => {result}."));
+            }
+        }
+        "write" => {
+            let path = map_string(fields, "path").unwrap_or_default();
+            let bytes = map_i64(fields, "bytes").unwrap_or(0);
+            lines.push(format!("[{ts}] write: '{path}' ({bytes} bytes)."));
+        }
+        "speak" => {
+            let voice_path = map_string(fields, "voice_path").unwrap_or_default();
+            let text_len = map_i64(fields, "text_len").unwrap_or(0);
+            lines.push(format!("[{ts}] speak: voice_path='{voice_path}' text_len={text_len}."));
+        }
+        "chat_start" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let messages = map_i64(fields, "messages").unwrap_or(0);
+            lines.push(format!("[{ts}] Chat start: {output_name} (messages={messages})."));
+        }
+        "chat_error" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let error = map_string(fields, "error").unwrap_or_default();
+            lines.push(format!("[{ts}] Chat error: {output_name} ({error})."));
+            if let Some(messages) = fields.get("messages") {
+                lines.push(format_chat_transcript(messages, None));
+            }
+        }
+        "chat_done" => {
+            let output_name = map_string(fields, "output_name").unwrap_or_default();
+            let outputs = map_i64(fields, "outputs").unwrap_or(0);
+            let visual_len = map_i64(fields, "visual_len").unwrap_or(0);
+            lines.push(format!(
+                "[{ts}] Chat done: {output_name} (outputs={outputs}, visual_len={visual_len})."
+            ));
+            let messages = fields.get("messages");
+            let assistant = fields.get("assistant_raw");
+            if messages.is_some() || assistant.is_some() {
+                lines.push(format_chat_transcript(
+                    messages.unwrap_or(&Value::Null),
+                    assistant,
+                ));
+            }
+        }
+        "menu_save" => {
+            let slot = map_i64(fields, "slot").unwrap_or(0);
+            let label = map_string(fields, "label").unwrap_or_default();
+            lines.push(format!("[{ts}] Saved slot {slot} ('{label}')."));
+        }
+        "menu_load" => {
+            let slot = map_i64(fields, "slot").unwrap_or(0);
+            let label = map_string(fields, "label").unwrap_or_default();
+            lines.push(format!("[{ts}] Loaded slot {slot} ('{label}')."));
+        }
+        "menu_reload" => {
+            lines.push(format!("[{ts}] Reloaded and restarted program."));
+        }
+        "menu_quit" => {
+            lines.push(format!("[{ts}] Quit requested from menu."));
+        }
+        _ => {}
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
+fn format_chat_transcript(messages: &Value, assistant: Option<&Value>) -> String {
+    let mut lines = Vec::new();
+    lines.push("----------------------------MESSAGES--------------------------".to_string());
+    if let Some(arr) = messages.as_array() {
+        for (idx, msg) in arr.iter().enumerate() {
+            if let Some(obj) = msg.as_object() {
+                let role = obj
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("user")
+                    .to_uppercase();
+                let content = obj.get("content").and_then(Value::as_str).unwrap_or("");
+                lines.push(format!("{role}\n{content}"));
+                if idx + 1 < arr.len() || assistant.is_some() {
+                    lines.push(String::new());
+                }
+            }
+        }
+    }
+    if let Some(Value::String(raw)) = assistant {
+        lines.push(format!("ASSISTANT\n{raw}"));
+    }
+    lines.push("--------------------------------------------------------------".to_string());
+    lines.join("\n")
+}
+
+fn map_string(fields: &Map<String, Value>, key: &str) -> Option<String> {
+    fields.get(key).map(|v| match v {
+        Value::String(s) => s.clone(),
+        _ => value_to_string(v),
+    })
+}
+
+fn map_i64(fields: &Map<String, Value>, key: &str) -> Option<i64> {
+    fields.get(key).and_then(Value::as_i64)
+}
+
+fn map_bool(fields: &Map<String, Value>, key: &str) -> Option<bool> {
+    fields.get(key).and_then(Value::as_bool)
+}
+
+fn map_value<'a>(fields: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    fields.get(key)
+}
+
+fn preview_value(value: &Value, max_len: usize) -> String {
+    let raw = serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"));
+    preview_text(&raw, max_len)
+}
+
+fn preview_text(text: &str, max_len: usize) -> String {
+    let len = text.chars().count();
+    if len <= max_len {
+        return text.to_string();
+    }
+    let head = (max_len.saturating_sub(5)) / 2;
+    let tail = max_len.saturating_sub(5) - head;
+    let prefix: String = text.chars().take(head).collect();
+    let suffix: String = text.chars().rev().take(tail).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{prefix}[...]{suffix}")
+}
+
+fn task_preview(task: &Task) -> String {
+    let mut parts = Vec::new();
+    for (k, v) in task {
+        if k == "traceback_label" {
+            continue;
+        }
+        parts.push(format!("{k}={}", preview_value(v, PREVIEW_LONG)));
+    }
+    parts.join(", ")
+}
+
+fn task_log_label(task: &Task, runtime_label: &str) -> String {
+    let cmd = task
+        .get("cmd")
+        .and_then(Value::as_str)
+        .unwrap_or("task");
+    if let Some(line) = task.get("line").and_then(Value::as_i64) {
+        return format!("{cmd}:{line}");
+    }
+    if runtime_label.is_empty() {
+        cmd.to_string()
+    } else {
+        runtime_label.to_string()
     }
 }
 
@@ -199,12 +484,14 @@ pub async fn run_program(
 
         let mut menu_open = false;
         let mut kill = false;
+        let mut terminated_by_user = false;
 
         while {
             let st = state.lock().await;
             st.get_i64("order_index") <= program.order.len() as i64
         } {
             if kill {
+                terminated_by_user = true;
                 break;
             }
 
@@ -221,7 +508,10 @@ pub async fn run_program(
                     .await?;
                     match action {
                         MenuAction::Close => menu_open = false,
-                        MenuAction::Quit => break,
+                        MenuAction::Quit => {
+                            terminated_by_user = true;
+                            break;
+                        }
                     }
                     continue;
                 } else {
@@ -275,6 +565,7 @@ pub async fn run_program(
                                                 }
                                                 UiEvent::Quit => {
                                                     kill = true;
+                                                    terminated_by_user = true;
                                                     saw_event = true;
                                                 }
                                             }
@@ -300,6 +591,7 @@ pub async fn run_program(
                                     token.cancel();
                                     ui.cancel_input();
                                     kill = true;
+                                    terminated_by_user = true;
                                     break;
                                 }
                                 None => {}
@@ -322,6 +614,12 @@ pub async fn run_program(
                     }
                 }
             }
+        }
+
+        if terminated_by_user {
+            logger.log("program_terminated", json!({ "reason": "user" }));
+        } else {
+            logger.log("program_complete", json!({ "reason": "end_of_order" }));
         }
 
         Ok::<(), anyhow::Error>(())
@@ -381,6 +679,24 @@ async fn execute_task(
         return Err(anyhow!("cancelled"));
     }
 
+    let log_label = task_log_label(&task, &runtime_label);
+    let log_preview = task_preview(&task);
+    let log_cmd = task
+        .get("cmd")
+        .and_then(Value::as_str)
+        .unwrap_or("task");
+    let log_line = task.get("line").and_then(Value::as_i64);
+    logger.log(
+        "task_start",
+        json!({
+            "label": log_label,
+            "runtime_label": runtime_label.clone(),
+            "cmd": log_cmd,
+            "line": log_line,
+            "preview": log_preview,
+        }),
+    );
+
     let inserts_snapshot = state.lock().await.inserts().clone();
     let interpolated = recursive_interpolate(&inserts_snapshot, Value::Object(task), &ctx)?;
     let task = interpolated
@@ -391,15 +707,6 @@ async fn execute_task(
         .get("cmd")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Task missing cmd"))?;
-
-    logger.log(
-        "task_start",
-        json!({
-            "label": runtime_label,
-            "cmd": cmd,
-            "line": task.get("line").and_then(Value::as_i64),
-        }),
-    );
 
     match cmd {
         "list_join" => {
@@ -484,11 +791,21 @@ async fn execute_task(
             let description = as_string(&task, "description")?;
             let output_name = as_string(&task, "output_name")?;
             if list.is_empty() {
-                let _ = io.select_index(Vec::new(), Some(description), true).await?;
+                let _ = await_with_cancel(
+                    &token,
+                    &io,
+                    io.select_index(Vec::new(), Some(description), true),
+                )
+                .await?;
                 with_inserts(state, |ins| set_interpdata(ins, &output_name, Value::Null)).await;
             } else {
                 let options = list.iter().map(value_to_string).collect::<Vec<_>>();
-                let choice_index = io.select_index(options, Some(description), true).await?;
+                let choice_index = await_with_cancel(
+                    &token,
+                    &io,
+                    io.select_index(options, Some(description), true),
+                )
+                .await?;
                 let choice = list
                     .get(choice_index)
                     .ok_or_else(|| anyhow!("Choice index out of bounds"))?
@@ -507,7 +824,12 @@ async fn execute_task(
         "user_input" => {
             let prompt = as_string(&task, "prompt")?;
             let output_name = as_string(&task, "output_name")?;
-            let input = io.user_input(prompt, String::new(), true).await?;
+            let input = await_with_cancel(
+                &token,
+                &io,
+                io.user_input(prompt, String::new(), true),
+            )
+            .await?;
             let escaped = input
                 .replace(INSERT_START, &format!("{ESCAPE}{INSERT_START}"))
                 .replace(INSERT_STOP, &format!("{ESCAPE}{INSERT_STOP}"));
@@ -596,6 +918,7 @@ async fn execute_task(
             if let Some(res) = futures.next().await {
                 group.cancel();
                 res?;
+                clear_order_indices(state.clone(), &format!("order_index/{}", runtime_label)).await;
             }
             while let Some(res) = futures.next().await {
                 let _ = res;
@@ -663,10 +986,19 @@ async fn execute_task(
                 if token.is_cancelled() {
                     return Err(anyhow!("cancelled"));
                 }
+                let mut iteration_items = Map::new();
                 for (name, list) in item_names.iter().zip(lists.iter()) {
                     let value = list[(counter - 1) as usize].clone();
+                    iteration_items.insert(name.clone(), value.clone());
                     with_inserts(state.clone(), |ins| set_interpdata(ins, name, value)).await;
                 }
+                logger.log(
+                    "for_iteration",
+                    json!({
+                        "iteration": counter,
+                        "items": iteration_items,
+                    }),
+                );
                 let sub_index_label = format!("order_index/{runtime_label}");
                 let mut sub_index = state.lock().await.get_i64(&sub_index_label);
                 while sub_index <= tasks.len() as i64 {
@@ -823,13 +1155,27 @@ async fn execute_task(
                 .get("repeat_until_done")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            logger.log(
+                "replace_map",
+                json!({
+                    "output_name": output_name.clone(),
+                    "repeat_until_done": repeat_until_done,
+                    "maps": maps.len(),
+                    "item_preview": preview_value(&item, PREVIEW_LONG),
+                }),
+            );
             let result = replace_map(item, &maps, &inserts_snapshot, &ctx, repeat_until_done)?;
             with_inserts(state, |ins| set_interpdata(ins, &output_name, result)).await;
         }
         "show_inserts" => {
             let inserts = state.lock().await.inserts().clone();
             let text = serde_json::to_string_pretty(&Value::Object(inserts))?;
-            let _ = io.select_index(vec!["Dismiss".to_string()], Some(text), true).await?;
+            let _ = await_with_cancel(
+                &token,
+                &io,
+                io.select_index(vec!["Dismiss".to_string()], Some(text), true),
+            )
+            .await?;
         }
         "random_choice" => {
             let list = as_array(&task, "list")?;
@@ -894,12 +1240,16 @@ async fn execute_task(
         "math" => {
             let input = as_string(&task, "input")?;
             let output_name = as_string(&task, "output_name")?;
+            let expression = interpolate_inserts(&inserts_snapshot, &input, &ctx)
+                .ok()
+                .map(|v| value_to_string(&v));
             let result = eval_math(&inserts_snapshot, &input, &ctx)?;
             logger.log(
                 "math",
                 json!({
                     "output_name": output_name.clone(),
                     "input": input,
+                    "expression": expression,
                     "result": result,
                 }),
             );
@@ -1027,6 +1377,7 @@ async fn execute_task(
                 .unwrap_or_default();
 
             let messages = interpolate_messages(messages, &inserts_snapshot, &ctx)?;
+            let messages_for_log = messages.clone();
 
             completion.remove("line");
             completion.remove("traceback_label");
@@ -1071,8 +1422,12 @@ async fn execute_task(
                 Ok(())
             };
 
-            let (outputs, visual_output) = loop {
-                let (outputs, visual_output) = run_chat(
+            let ChatResult {
+                outputs,
+                visual_output,
+                raw,
+            } = loop {
+                let result = run_chat(
                     ChatArgs {
                         messages: messages.clone(),
                         completion_args: completion.clone(),
@@ -1089,7 +1444,25 @@ async fn execute_task(
                     },
                     Some(&mut on_text),
                 )
-                .await?;
+                .await;
+                let ChatResult {
+                    outputs,
+                    visual_output,
+                    raw,
+                } = match result {
+                    Ok(result) => result,
+                    Err(err) => {
+                        logger.log(
+                            "chat_error",
+                            json!({
+                                "output_name": output_name.clone(),
+                                "error": err.to_string(),
+                                "messages": messages_for_log.clone(),
+                            }),
+                        );
+                        return Err(err);
+                    }
+                };
                 if outputs.len() < n_outputs as usize {
                     io.write(format!(
                         "\n(Expected {n_outputs} outputs, got {}. Retrying.)\n",
@@ -1099,7 +1472,11 @@ async fn execute_task(
                     sleep(Duration::from_secs(2)).await;
                     continue;
                 }
-                break (outputs, visual_output);
+                break ChatResult {
+                    outputs,
+                    visual_output,
+                    raw,
+                };
             };
 
             if let Some(writer) = tts_writer.as_ref() {
@@ -1127,6 +1504,8 @@ async fn execute_task(
                     "output_name": output_name,
                     "outputs": outputs_len,
                     "visual_len": visual_len,
+                    "messages": messages_for_log,
+                    "assistant_raw": raw,
                 }),
             );
             if !visual_output.is_empty() {
@@ -1149,6 +1528,32 @@ where
     let mut st = state.lock().await;
     let inserts = st.inserts_mut();
     f(inserts);
+}
+
+async fn clear_order_indices(state: Arc<Mutex<State>>, prefix: &str) {
+    let mut st = state.lock().await;
+    let keys: Vec<String> = st
+        .data
+        .keys()
+        .filter(|k| k.starts_with(prefix))
+        .cloned()
+        .collect();
+    for k in keys {
+        st.data.remove(&k);
+    }
+}
+
+async fn await_with_cancel<T, F>(token: &CancellationToken, io: &Io, fut: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    tokio::select! {
+        res = fut => res,
+        _ = token.cancelled() => {
+            io.cancel_input();
+            Err(anyhow!("cancelled"))
+        }
+    }
 }
 
 fn as_string(task: &Task, key: &str) -> Result<String> {
@@ -1662,6 +2067,12 @@ impl Io {
             Io::Agent(agent) => agent.lock().await.select_index(options, description).await,
         }
     }
+    fn cancel_input(&self) {
+        match self {
+            Io::Ui(ui) => ui.cancel_input(),
+            Io::Agent(_) => {}
+        }
+    }
     async fn start_tts_stream(&self, voice_path: &str, voice_speaker: Option<i64>) -> Result<TtsWriter> {
         match self {
             Io::Ui(_) => TtsWriter::start(voice_path, voice_speaker),
@@ -1728,7 +2139,16 @@ impl AgentIo {
             });
             let _ = fs::remove_file(&self.input_path);
             fs::write(&self.output_path, serde_json::to_string_pretty(&payload)?)?;
-            return Ok(0);
+            loop {
+                if self.input_path.exists() {
+                    let data = fs::read_to_string(&self.input_path)?;
+                    let _ = fs::remove_file(&self.input_path);
+                    if !data.trim().is_empty() {
+                        return Ok(0);
+                    }
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
         }
         let keys = if options.len() <= 9 {
             (1..=options.len()).map(|i| i.to_string()).collect::<Vec<_>>()
