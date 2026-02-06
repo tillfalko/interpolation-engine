@@ -15,8 +15,6 @@ pub struct Diagnostic {
 pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()> {
     let mut diags = Vec::new();
 
-    let insert_keys = collect_possible_insert_keys(program, ctx);
-    let global_labels = collect_labels(program);
     let default_inserts = program
         .default_state
         .get("inserts")
@@ -33,8 +31,6 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
         &program.order,
         "order",
         &named,
-        &insert_keys,
-        &global_labels,
         &default_inserts,
         ctx,
         &mut diags,
@@ -45,8 +41,6 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
             &[task.clone()],
             &format!("named_tasks.{name}"),
             &named,
-            &insert_keys,
-            &global_labels,
             &default_inserts,
             ctx,
             &mut diags,
@@ -66,68 +60,21 @@ pub fn analyze_program(program: &Program, ctx: &ProgramLoadContext) -> Result<()
     }
 }
 
-fn collect_possible_insert_keys(program: &Program, ctx: &ProgramLoadContext) -> HashSet<String> {
-    let mut keys = HashSet::new();
-    if let Some(inserts) = program.default_state.get("inserts").and_then(Value::as_object) {
-        for k in inserts.keys() {
-            keys.insert(k.clone());
-        }
-    }
-    keys.insert("HH:MM".to_string());
-    keys.insert("HH:MM:SS".to_string());
-    keys.extend(ctx.inserts_dir_keys.iter().cloned());
-
-    let mut stack = Vec::new();
-    stack.extend(program.order.iter().cloned());
-    stack.extend(program.named_tasks.values().cloned());
-
-    while let Some(task) = stack.pop() {
-        if let Some(output_name) = task.get("output_name").and_then(Value::as_str) {
-            keys.insert(output_name.to_string());
-        }
-        if task.get("cmd").and_then(Value::as_str) == Some("for") {
-            if let Some(map) = task.get("name_list_map").and_then(Value::as_object) {
-                for k in map.keys() {
-                    keys.insert(k.clone());
-                }
-            }
-        }
-        if let Some(tasks) = task.get("tasks") {
-            if let Some(arr) = tasks.as_array() {
-                for t in arr {
-                    if let Ok(subtask) = super_task(t) {
-                        stack.push(subtask);
-                    }
-                }
-            }
-        }
-        if let Some(item) = task.get("item") {
-            if let Ok(item_task) = super_task(item) {
-                stack.push(item_task);
-            }
-        }
-    }
-
-    keys
-}
-
 fn analyze_task_list(
     tasks: &[Task],
     scope_name: &str,
     named_tasks: &HashSet<String>,
-    insert_keys: &HashSet<String>,
-    global_labels: &HashSet<String>,
     default_inserts: &Map<String, Value>,
     ctx: &ProgramLoadContext,
     diags: &mut Vec<Diagnostic>,
 ) {
+    let labels = collect_labels_for_list(tasks, diags);
     for task in tasks {
         validate_task(
             task,
             scope_name,
             named_tasks,
-            insert_keys,
-            global_labels,
+            &labels,
             default_inserts,
             ctx,
             diags,
@@ -142,8 +89,6 @@ fn analyze_task_list(
                     &subtasks,
                     scope_name,
                     named_tasks,
-                    insert_keys,
-                    global_labels,
                     default_inserts,
                     ctx,
                     diags,
@@ -157,7 +102,6 @@ fn validate_task(
     task: &Task,
     scope_name: &str,
     named_tasks: &HashSet<String>,
-    insert_keys: &HashSet<String>,
     labels: &HashSet<String>,
     default_inserts: &Map<String, Value>,
     ctx: &ProgramLoadContext,
@@ -179,6 +123,7 @@ fn validate_task(
         "clear" => {}
         "sleep" => {
             require_fields(task, &["seconds"], diags);
+            require_number_or_string(task, "seconds", default_inserts, ctx, diags);
         }
         "set" => {
             require_fields(task, &["item", "output_name"], diags);
@@ -197,6 +142,11 @@ fn validate_task(
             require_fields(task, &["list", "output_name"], diags);
             require_array(task, "list", default_inserts, ctx, diags);
             require_string(task, "output_name", default_inserts, ctx, diags);
+            if let Some(list) = get_static_array(task.get("list"), default_inserts, ctx) {
+                if list.is_empty() {
+                    diags.push(diag(task, "random_choice list is empty".to_string()));
+                }
+            }
         }
         "list_join" => {
             require_fields(task, &["list", "before", "between", "after", "output_name"], diags);
@@ -210,6 +160,26 @@ fn validate_task(
             require_fields(task, &["lists", "output_name"], diags);
             require_array(task, "lists", default_inserts, ctx, diags);
             require_string(task, "output_name", default_inserts, ctx, diags);
+            if let Some(arr) = get_static_array(task.get("lists"), default_inserts, ctx) {
+                for item in arr {
+                    if item.as_array().is_some() {
+                        continue;
+                    }
+                    if is_simple_interpolation(&item) {
+                        continue;
+                    }
+                    if let Some(resolved) = resolve_simple_value(&item, default_inserts, ctx) {
+                        if resolved.as_array().is_some() {
+                            continue;
+                        }
+                    }
+                    diags.push(diag(
+                        task,
+                        "list_concat.lists must contain only arrays or simple interpolations".to_string(),
+                    ));
+                    break;
+                }
+            }
         }
         "list_append" => {
             require_fields(task, &["list", "item", "output_name"], diags);
@@ -224,12 +194,38 @@ fn validate_task(
         "list_index" => {
             require_fields(task, &["list", "index", "output_name"], diags);
             require_array(task, "list", default_inserts, ctx, diags);
+            require_int_or_string(task, "index", default_inserts, ctx, diags);
             require_string(task, "output_name", default_inserts, ctx, diags);
+            if let Some(list) = get_static_array(task.get("list"), default_inserts, ctx) {
+                if let Some(idx) = literal_int(task.get("index")) {
+                    if idx == 0 {
+                        diags.push(diag(task, "list_index index 0 is invalid (1-based)".to_string()));
+                    } else if is_index_out_of_bounds(idx, list.len()) {
+                        diags.push(diag(task, "list_index index out of bounds".to_string()));
+                    }
+                }
+            }
         }
         "list_slice" => {
             require_fields(task, &["list", "from_index", "to_index", "output_name"], diags);
             require_array(task, "list", default_inserts, ctx, diags);
+            require_int_or_string(task, "from_index", default_inserts, ctx, diags);
+            require_int_or_string(task, "to_index", default_inserts, ctx, diags);
             require_string(task, "output_name", default_inserts, ctx, diags);
+            if let Some(list) = get_static_array(task.get("list"), default_inserts, ctx) {
+                if let Some(from_idx) = literal_int(task.get("from_index")) {
+                    if from_idx == 0 {
+                        diags.push(diag(task, "list_slice from_index 0 is invalid (1-based)".to_string()));
+                    } else if is_index_out_of_bounds(from_idx, list.len()) {
+                        diags.push(diag(task, "list_slice from_index out of bounds".to_string()));
+                    }
+                }
+                if let Some(to_idx) = literal_int(task.get("to_index")) {
+                    if to_idx != 0 && is_index_out_of_bounds(to_idx, list.len()) {
+                        diags.push(diag(task, "list_slice to_index out of bounds".to_string()));
+                    }
+                }
+            }
         }
         "user_input" => {
             require_fields(task, &["prompt", "output_name"], diags);
@@ -254,7 +250,7 @@ fn validate_task(
             require_fields(task, &["name"], diags);
             require_string(task, "name", default_inserts, ctx, diags);
             if let Some(target) = task.get("name").and_then(Value::as_str) {
-                if target != "CONTINUE" && !labels.contains(target) {
+                if is_literal_no_braces(target) && target != "CONTINUE" && !labels.contains(target) {
                     diags.push(diag(
                         task,
                         format!("goto target '{target}' not found in {scope_name}"),
@@ -267,6 +263,13 @@ fn validate_task(
             require_string(task, "text", default_inserts, ctx, diags);
             require_array(task, "target_maps", default_inserts, ctx, diags);
             if let Some(target_maps) = task.get("target_maps").and_then(Value::as_array) {
+                if target_maps.is_empty() {
+                    diags.push(diag(task, "goto_map.target_maps must not be empty".to_string()));
+                }
+                if let Some(text) = task.get("text").and_then(Value::as_str) {
+                    ensure_balanced_interpolation(task, "text", text, diags);
+                }
+                let mut literal_keys: Vec<(String, String)> = Vec::new();
                 for entry in target_maps {
                     let obj = match entry.as_object() {
                         Some(o) => o,
@@ -283,15 +286,42 @@ fn validate_task(
                     if target_key.as_str().is_empty() {
                         diags.push(diag(task, "target_maps keys must be non-empty strings".to_string()));
                     }
-                    if let Some(target) = target_val.as_str() {
-                        if !target.contains('{') && target != "CONTINUE" && !labels.contains(target) {
+                    ensure_balanced_interpolation(task, "target_maps key", target_key, diags);
+                    if !is_string_or_simple_interpolation(target_val) {
+                        diags.push(diag(task, "target_maps values must be strings".to_string()));
+                        continue;
+                    }
+                    if let Some(val) = target_val.as_str() {
+                        ensure_balanced_interpolation(task, "target_maps value", val, diags);
+                    }
+                    if let Some(val_str) = target_val.as_str() {
+                        if is_literal_no_braces(target_key.as_str()) && is_literal_no_braces(val_str) {
+                            literal_keys.push((target_key.clone(), val_str.to_string()));
+                        }
+                    }
+                }
+                if let Some(text) = task.get("text").and_then(Value::as_str) {
+                    if is_literal_no_braces(text) && !literal_keys.is_empty() {
+                        let mut matched = None;
+                        for (key, val) in &literal_keys {
+                            if wildcard_match(key, text) {
+                                matched = Some(val.clone());
+                                break;
+                            }
+                        }
+                        if let Some(target) = matched {
+                            if target != "CONTINUE" && !labels.contains(target.as_str()) {
+                                diags.push(diag(
+                                    task,
+                                    format!("goto_map target '{target}' not found in {scope_name}"),
+                                ));
+                            }
+                        } else {
                             diags.push(diag(
                                 task,
-                                format!("goto_map target '{target}' not found in {scope_name}"),
+                                format!("goto_map has no matches for literal text '{text}'"),
                             ));
                         }
-                    } else {
-                        diags.push(diag(task, "target_maps values must be strings".to_string()));
                     }
                 }
             }
@@ -311,6 +341,14 @@ fn validate_task(
                     };
                     if obj.len() != 1 {
                         diags.push(diag(task, "wildcard_maps entries must have 1 key".to_string()));
+                        continue;
+                    }
+                    let (k, v) = obj.iter().next().unwrap();
+                    ensure_balanced_interpolation(task, "wildcard_maps key", k, diags);
+                    if let Some(val) = v.as_str() {
+                        ensure_balanced_interpolation(task, "wildcard_maps value", val, diags);
+                    } else if !is_simple_interpolation(v) {
+                        diags.push(diag(task, "wildcard_maps values must be strings".to_string()));
                     }
                 }
             }
@@ -319,6 +357,35 @@ fn validate_task(
             require_fields(task, &["name_list_map", "tasks"], diags);
             require_object(task, "name_list_map", default_inserts, ctx, diags);
             require_task_array(task, "tasks", default_inserts, ctx, diags);
+            if let Some(map) = task.get("name_list_map").and_then(Value::as_object) {
+                let mut static_lists = Vec::new();
+                for (name, value) in map {
+                    if let Some(arr) = get_static_array(Some(value), default_inserts, ctx) {
+                        static_lists.push((name.clone(), arr.len()));
+                        continue;
+                    }
+                    if value.as_str().is_some() && !is_simple_interpolation(value) {
+                        diags.push(diag(
+                            task,
+                            format!("for.name_list_map value for '{name}' must be a list or simple interpolation"),
+                        ));
+                        return;
+                    }
+                    if !value.is_array() && value.as_str().is_none() {
+                        diags.push(diag(
+                            task,
+                            format!("for.name_list_map value for '{name}' must be a list or simple interpolation"),
+                        ));
+                        return;
+                    }
+                }
+                if static_lists.len() == map.len() && !static_lists.is_empty() {
+                    let expected = static_lists[0].1;
+                    if static_lists.iter().any(|(_, len)| *len != expected) {
+                        diags.push(diag(task, "for lists have differing lengths".to_string()));
+                    }
+                }
+            }
         }
         "serial" | "parallel_wait" | "parallel_race" => {
             require_fields(task, &["tasks"], diags);
@@ -339,6 +406,7 @@ fn validate_task(
         }
         "math" => {
             require_fields(task, &["input", "output_name"], diags);
+            require_string(task, "input", default_inserts, ctx, diags);
             require_string(task, "output_name", default_inserts, ctx, diags);
         }
         "chat" => {
@@ -346,6 +414,14 @@ fn validate_task(
             require_array(task, "messages", default_inserts, ctx, diags);
             require_string(task, "output_name", default_inserts, ctx, diags);
             validate_voice_path(task, ctx, diags);
+            if let Some(msgs) = get_static_array(task.get("messages"), default_inserts, ctx) {
+                for msg in msgs {
+                    let Some(obj) = msg.as_object() else { continue };
+                    if let Some(content) = obj.get("content").and_then(Value::as_str) {
+                        ensure_balanced_interpolation(task, "chat.messages.content", content, diags);
+                    }
+                }
+            }
         }
         "speak" => {
             require_fields(task, &["text", "voice_path"], diags);
@@ -356,38 +432,14 @@ fn validate_task(
         _ => diags.push(diag(task, format!("Unknown cmd '{cmd}'"))),
     }
 
-    let goto_map_allows_null = cmd == "goto_map" && has_null_map_entry(task, "target_maps");
-    let replace_map_allows_null = cmd == "replace_map" && has_null_map_entry(task, "wildcard_maps");
-
-    for (k, value) in task.iter() {
-        if k == "tasks" {
-            continue;
+    if cmd == "goto_map" && has_null_map_entry(task, "target_maps") {
+        if let Some(text) = task.get("text").and_then(Value::as_str) {
+            ensure_balanced_interpolation(task, "text", text, diags);
         }
-        if value
-            .as_array()
-            .is_some_and(|arr| arr.iter().all(|v| v.as_object().is_some()))
-        {
-            continue;
-        }
-        if value
-            .as_object()
-            .is_some_and(|obj| obj.get("cmd").and_then(Value::as_str).is_some())
-        {
-            continue;
-        }
-        for key in extract_insert_keys(value) {
-            let is_numeric_capture = cmd == "replace_map" && key.chars().all(|c| c.is_ascii_digit());
-            let allows_null = (cmd == "goto_map" && k == "text" && goto_map_allows_null)
-                || (cmd == "replace_map" && k == "item" && replace_map_allows_null);
-            if !is_possible_insert(&key, insert_keys) && !key.starts_with("ARG") && !is_numeric_capture {
-                if allows_null {
-                    continue;
-                }
-                diags.push(diag(
-                    task,
-                    format!("Interpolation key '{key}' will never be defined"),
-                ));
-            }
+    }
+    if cmd == "replace_map" && has_null_map_entry(task, "wildcard_maps") {
+        if let Some(item) = task.get("item").and_then(Value::as_str) {
+            ensure_balanced_interpolation(task, "item", item, diags);
         }
     }
 }
@@ -441,20 +493,6 @@ fn resolve_path_ctx(ctx: &ProgramLoadContext, path: &str) -> PathBuf {
     }
 }
 
-fn is_possible_insert(key: &str, insert_keys: &HashSet<String>) -> bool {
-    if insert_keys.contains(key) {
-        return true;
-    }
-    if key.contains('*') {
-        for k in insert_keys {
-            if wildcard_match(key, k) || wildcard_match(k, key) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn wildcard_match(pattern: &str, s: &str) -> bool {
     let mut regex = String::from("^");
     for ch in pattern.chars() {
@@ -498,6 +536,56 @@ fn require_string(
             return;
         }
         diags.push(diag(task, format!("Field '{field}' must be a string")));
+    }
+}
+
+fn require_number_or_string(
+    task: &Task,
+    field: &str,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(v) = task.get(field) {
+        if v.is_string() || v.is_number() {
+            return;
+        }
+        if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+            if resolved.is_string() || resolved.is_number() {
+                return;
+            }
+            diags.push(diag(task, format!("Field '{field}' must be a number or string")));
+            return;
+        }
+        if is_simple_interpolation(v) {
+            return;
+        }
+        diags.push(diag(task, format!("Field '{field}' must be a number or string")));
+    }
+}
+
+fn require_int_or_string(
+    task: &Task,
+    field: &str,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(v) = task.get(field) {
+        if v.as_i64().is_some() || v.is_string() {
+            return;
+        }
+        if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+            if resolved.as_i64().is_some() || resolved.is_string() {
+                return;
+            }
+            diags.push(diag(task, format!("Field '{field}' must be an int or string")));
+            return;
+        }
+        if is_simple_interpolation(v) {
+            return;
+        }
+        diags.push(diag(task, format!("Field '{field}' must be an int or string")));
     }
 }
 
@@ -601,6 +689,23 @@ fn resolve_simple_value(
     get_interpdata(default_inserts, &key, ctx).ok()
 }
 
+fn collect_labels_for_list(tasks: &[Task], diags: &mut Vec<Diagnostic>) -> HashSet<String> {
+    let mut labels = HashSet::new();
+    for task in tasks {
+        if task.get("cmd").and_then(Value::as_str) != Some("label") {
+            continue;
+        }
+        let Some(name) = task.get("name").and_then(Value::as_str) else {
+            diags.push(diag(task, "label.name must be a string".to_string()));
+            continue;
+        };
+        if !labels.insert(name.to_string()) {
+            diags.push(diag(task, format!("Label '{name}' is not unique in this task list")));
+        }
+    }
+    labels
+}
+
 fn diag(task: &Task, message: String) -> Diagnostic {
     Diagnostic {
         message,
@@ -619,24 +724,107 @@ fn super_task(value: &Value) -> Result<Task> {
         .ok_or_else(|| anyhow!("Not a task"))
 }
 
-fn collect_labels(program: &Program) -> HashSet<String> {
-    let mut labels = HashSet::new();
-    let mut stack = Vec::new();
-    stack.extend(program.order.iter().cloned());
-    stack.extend(program.named_tasks.values().cloned());
-    while let Some(task) = stack.pop() {
-        if task.get("cmd").and_then(Value::as_str) == Some("label") {
-            if let Some(name) = task.get("name").and_then(Value::as_str) {
-                labels.insert(name.to_string());
-            }
+fn scan_braces(s: &str) -> BraceScan {
+    let mut depth = 0;
+    let mut escaped = false;
+    let mut has_unescaped = false;
+    let mut balanced = true;
+    for ch in s.chars() {
+        if escaped {
+            escaped = false;
+            continue;
         }
-        if let Some(tasks) = task.get("tasks").and_then(Value::as_array) {
-            for t in tasks {
-                if let Ok(subtask) = super_task(t) {
-                    stack.push(subtask);
-                }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '{' {
+            has_unescaped = true;
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            has_unescaped = true;
+            if depth == 0 {
+                balanced = false;
+            } else {
+                depth -= 1;
             }
         }
     }
-    labels
+    if depth != 0 {
+        balanced = false;
+    }
+    BraceScan {
+        balanced,
+        has_unescaped,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BraceScan {
+    balanced: bool,
+    has_unescaped: bool,
+}
+
+fn is_literal_no_braces(s: &str) -> bool {
+    let scan = scan_braces(s);
+    scan.balanced && !scan.has_unescaped
+}
+
+fn ensure_balanced_interpolation(task: &Task, field: &str, s: &str, diags: &mut Vec<Diagnostic>) {
+    let scan = scan_braces(s);
+    if !scan.balanced {
+        diags.push(diag(
+            task,
+            format!("Field '{field}' has malformed interpolation (uneven braces)"),
+        ));
+    }
+    if extract_insert_keys(&Value::String(s.to_string()))
+        .iter()
+        .any(|k| k.is_empty())
+    {
+        diags.push(diag(
+            task,
+            format!("Field '{field}' contains an empty interpolation key"),
+        ));
+    }
+}
+
+fn is_string_or_simple_interpolation(value: &Value) -> bool {
+    value.is_string() || is_simple_interpolation(value)
+}
+
+fn get_static_array(
+    value: Option<&Value>,
+    default_inserts: &Map<String, Value>,
+    ctx: &ProgramLoadContext,
+) -> Option<Vec<Value>> {
+    let v = value?;
+    if let Some(arr) = v.as_array() {
+        return Some(arr.clone());
+    }
+    if let Some(resolved) = resolve_simple_value(v, default_inserts, ctx) {
+        if let Some(arr) = resolved.as_array() {
+            return Some(arr.clone());
+        }
+    }
+    None
+}
+
+fn literal_int(value: Option<&Value>) -> Option<i64> {
+    value?.as_i64()
+}
+
+fn is_index_out_of_bounds(idx: i64, len: usize) -> bool {
+    let len_i = len as i64;
+    if idx > 0 {
+        let pos = idx - 1;
+        pos < 0 || pos >= len_i
+    } else if idx < 0 {
+        let pos = len_i + idx;
+        pos < 0 || pos >= len_i
+    } else {
+        true
+    }
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind, DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -151,7 +151,16 @@ struct UiState {
     history: Vec<String>,
     history_cursor: Option<usize>,
     history_stash: Option<String>,
+    output_scroll: usize,
+    auto_scroll: bool,
+    last_layout: Option<LayoutInfo>,
     dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LayoutInfo {
+    output_height: usize,
+    max_scroll: usize,
 }
 
 fn spawn_ui_thread(
@@ -169,6 +178,9 @@ fn spawn_ui_thread(
             history: Vec::new(),
             history_cursor: None,
             history_stash: None,
+            output_scroll: 0,
+            auto_scroll: true,
+            last_layout: None,
             dirty: true,
         };
         if let Some(path) = &state.history_path {
@@ -189,8 +201,12 @@ fn spawn_ui_thread(
             }
 
             if event::poll(Duration::from_millis(10)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                    let (quit, changed) = handle_key(key, &mut state, &event_tx);
+                if let Ok(event) = event::read() {
+                    let (quit, changed) = match event {
+                        Event::Key(key) => handle_key(key, &mut state, &event_tx),
+                        Event::Mouse(mouse) => (false, handle_mouse(mouse.kind, &mut state)),
+                        _ => (false, false),
+                    };
                     if changed {
                         state.dirty = true;
                     }
@@ -198,12 +214,12 @@ fn spawn_ui_thread(
                         cleanup_terminal(terminal.take());
                         return;
                     }
-            }
+                }
             }
 
             if state.dirty || last_draw.elapsed() > Duration::from_millis(200) {
                 if let Some(term) = terminal.as_mut() {
-                    let _ = draw(term, &state);
+                    let _ = draw(term, &mut state);
                 }
                 last_draw = Instant::now();
                 state.dirty = false;
@@ -216,14 +232,26 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) -> bool {
     match cmd {
         UiCommand::Write(text) => {
             state.output.push_str(&text);
+            if state.auto_scroll {
+                if let Some(layout) = state.last_layout {
+                    state.output_scroll = layout.max_scroll;
+                }
+            }
             true
         }
         UiCommand::Clear => {
             state.output.clear();
+            state.output_scroll = 0;
+            state.auto_scroll = true;
             true
         }
         UiCommand::SetOutput(text) => {
             state.output = text;
+            if state.auto_scroll {
+                if let Some(layout) = state.last_layout {
+                    state.output_scroll = layout.max_scroll;
+                }
+            }
             true
         }
         UiCommand::BeginInput {
@@ -413,14 +441,22 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                 changed = true;
             }
             KeyCode::Home => {
-                *cursor = 0;
-                state.history_cursor = None;
-                changed = true;
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    changed = scroll_output_key(key.code, state);
+                } else {
+                    *cursor = 0;
+                    state.history_cursor = None;
+                    changed = true;
+                }
             }
             KeyCode::End => {
-                *cursor = buffer.len();
-                state.history_cursor = None;
-                changed = true;
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    changed = scroll_output_key(key.code, state);
+                } else {
+                    *cursor = buffer.len();
+                    state.history_cursor = None;
+                    changed = true;
+                }
             }
             KeyCode::Delete => {
                 let next = next_char_index(buffer, *cursor);
@@ -454,6 +490,11 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                 *cursor += c.len_utf8();
                 state.history_cursor = None;
                 changed = true;
+            }
+            KeyCode::PageUp | KeyCode::PageDown
+                if key.modifiers.contains(KeyModifiers::CONTROL) || key.code == KeyCode::PageUp || key.code == KeyCode::PageDown =>
+            {
+                changed = scroll_output_key(key.code, state);
             }
             _ => {}
         },
@@ -557,6 +598,9 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                     };
                     changed = true;
                 }
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                    changed = scroll_output_key(key.code, state);
+                }
                 _ => {
                     state.mode = Mode::Search {
                         prompt_inline: m.0,
@@ -583,29 +627,113 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                 state.mode = Mode::Idle;
                 return (false, true);
             }
-            if let KeyCode::Char(c) = key.code {
-                let key_str = c.to_string();
-                if let Some(idx) = keys.iter().position(|k| k == &key_str) {
-                    if let Some(tx) = respond_to.take() {
-                        let _ = tx.send(idx);
-                    }
-                    state.mode = Mode::Idle;
-                    changed = true;
-                } else {
-                    if let Some(idx) = options.iter().position(|o| o == &key_str) {
+            match key.code {
+                KeyCode::Char(c) => {
+                    let key_str = c.to_string();
+                    if let Some(idx) = keys.iter().position(|k| k == &key_str) {
                         if let Some(tx) = respond_to.take() {
                             let _ = tx.send(idx);
                         }
                         state.mode = Mode::Idle;
                         changed = true;
+                    } else {
+                        if let Some(idx) = options.iter().position(|o| o == &key_str) {
+                            if let Some(tx) = respond_to.take() {
+                                let _ = tx.send(idx);
+                            }
+                            state.mode = Mode::Idle;
+                            changed = true;
+                        }
                     }
                 }
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                    changed = scroll_output_key(key.code, state);
+                }
+                _ => {}
             }
         }
-        Mode::Idle => {}
+        Mode::Idle => {
+            match key.code {
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                    changed = scroll_output_key(key.code, state);
+                }
+                KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    changed = scroll_output_key(key.code, state);
+                }
+                _ => {}
+            }
+        }
     }
 
     (false, changed)
+}
+
+fn handle_mouse(kind: MouseEventKind, state: &mut UiState) -> bool {
+    match kind {
+        MouseEventKind::ScrollUp => scroll_output_lines(state, 3),
+        MouseEventKind::ScrollDown => scroll_output_lines(state, -3),
+        _ => false,
+    }
+}
+
+fn scroll_output_key(code: KeyCode, state: &mut UiState) -> bool {
+    match code {
+        KeyCode::PageUp => scroll_output_page(state, -1),
+        KeyCode::PageDown => scroll_output_page(state, 1),
+        KeyCode::Home => scroll_output_home_end(state, true),
+        KeyCode::End => scroll_output_home_end(state, false),
+        KeyCode::Up => scroll_output_lines(state, 1),
+        KeyCode::Down => scroll_output_lines(state, -1),
+        _ => false,
+    }
+}
+
+fn scroll_output_page(state: &mut UiState, pages: i32) -> bool {
+    let Some(layout) = state.last_layout else { return false };
+    if layout.output_height == 0 {
+        return false;
+    }
+    let delta = layout.output_height as i32 * pages;
+    scroll_output_delta(state, delta)
+}
+
+fn scroll_output_lines(state: &mut UiState, lines: i32) -> bool {
+    scroll_output_delta(state, -lines)
+}
+
+fn scroll_output_home_end(state: &mut UiState, home: bool) -> bool {
+    let Some(layout) = state.last_layout else { return false };
+    let new_scroll = if home { 0 } else { layout.max_scroll };
+    if new_scroll == state.output_scroll && (!home || state.auto_scroll) {
+        return false;
+    }
+    state.output_scroll = new_scroll;
+    state.auto_scroll = state.output_scroll == layout.max_scroll;
+    true
+}
+
+fn scroll_output_delta(state: &mut UiState, delta: i32) -> bool {
+    let Some(layout) = state.last_layout else { return false };
+    if layout.max_scroll == 0 {
+        state.output_scroll = 0;
+        state.auto_scroll = true;
+        return false;
+    }
+    let current = state.output_scroll as i32;
+    let max_scroll = layout.max_scroll as i32;
+    let mut next = current + delta;
+    if next < 0 {
+        next = 0;
+    } else if next > max_scroll {
+        next = max_scroll;
+    }
+    let next_usize = next as usize;
+    if next_usize == state.output_scroll {
+        return false;
+    }
+    state.output_scroll = next_usize;
+    state.auto_scroll = state.output_scroll == layout.max_scroll;
+    true
 }
 
 fn append_history(path: &PathBuf, text: &str) -> io::Result<()> {
@@ -654,9 +782,8 @@ fn find_history_match(history: &[String], query: &str, start_from: Option<usize>
     None
 }
 
-fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> io::Result<()> {
-    terminal
-        .draw(|f| {
+fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &mut UiState) -> io::Result<()> {
+    terminal.draw(|f| {
         let size = f.size();
         let info_text = match &state.mode {
             Mode::Choice { description, options, keys, .. } => {
@@ -721,8 +848,22 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
             ])
             .split(size);
 
+        let total_output_lines = wrapped_line_count(&state.output, width);
+        let max_scroll = total_output_lines.saturating_sub(output_height);
+        state.last_layout = Some(LayoutInfo {
+            output_height,
+            max_scroll,
+        });
+
+        let scroll_offset = if state.auto_scroll {
+            max_scroll
+        } else {
+            state.output_scroll.min(max_scroll)
+        };
+
         let output = Paragraph::new(Text::from(state.output.clone()))
             .wrap(Wrap { trim: false })
+            .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0))
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(output, chunks[0]);
 
@@ -757,8 +898,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &UiState) -> i
             }
             _ => {}
         }
-    })
-    .map(|_| ())
+    }).map(|_| ())
 }
 
 fn split_prompt(prompt: &str) -> (String, String) {
@@ -908,7 +1048,7 @@ fn char_at(text: &str, idx: usize) -> char {
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
@@ -916,7 +1056,7 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
 fn cleanup_terminal(term: Option<Terminal<CrosstermBackend<Stdout>>>) {
     if let Some(mut terminal) = term {
         let _ = disable_raw_mode();
-        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen);
         let _ = terminal.show_cursor();
     }
 }

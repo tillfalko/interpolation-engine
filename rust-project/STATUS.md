@@ -1,4 +1,4 @@
-# Interpolation-Engine Rust Rewrite: Current Status (Updated 2026-02-03)
+# Interpolation-Engine Rust Rewrite: Current Status (Updated 2026-02-06)
 
 ## Understanding (Behavior + Compatibility)
 Interpolation-engine is a CLI runtime that executes "programs" defined in JSON5. A program has:
@@ -37,24 +37,38 @@ Implemented in `rust-project/` with the following:
 
 Build:
 - `reqwest` uses `rustls-tls` (no OpenSSL).
-- `cargo build` last run in this session (warnings remain).
+- `cargo build` last run in this session (clean).
 
 Local LLM server:
-- `http://localhost:8080/v1/models` is reachable in this environment (curl succeeds).
+- API default changed to `http://0.0.0.0:8080` (still overrideable via `api_url`).
 
 Verified runs (agent-mode) in this session:
-- Not yet run.
+- `examples/goto.json5` runs.
+- `examples/text_adventure.json5` blocked here due to sandbox network restrictions on outbound TCP (model server not reachable in this environment).
+
+## Approving Network Access (Agent Mode)
+This environment blocks outbound TCP in the sandbox. To let agent-mode reach a model server, run the binary outside the sandbox and then provide agent input.
+
+Steps:
+1. Run with escalation:
+   - `./target/debug/interpolation-engine --agent-mode ../examples/text_adventure.json5`
+2. Feed initial input:
+   - `printf "A castle at dusk.\n" > /tmp/agent_input`
+3. Check logs:
+   - `tail -n 80 /tmp/agent_run.log`
+
+Expected if the server is reachable but the model name is invalid:
+`Error: Chat request failed: 400 Bad Request {"error":{"code":400,"message":"model not found","type":"invalid_request_error"}}`
 
 ## Known Issues / Gaps
-- `--log` is parsed but unused in runtime (field exists in `RuntimeOptions` only).
 - Chat examples still not validated in this environment: local socket access for chat is blocked in agent-mode runs (see latest run attempt).
+- Output scrolling in the TUI was missing; fixed to support PageUp/PageDown, Ctrl+Up/Down, Home/End, and mouse wheel scrolling (auto-scroll keeps the view pinned to the bottom unless the user scrolls up).
 
 ## Near-Term Plan
 1. **Finish compatibility testing**:
    - Run `api.json5`, `character_creator.json5`, `text_adventure*.json5` once local socket access is available.
 2. **Polish warnings**:
-   - Remove unused imports/vars.
-   - Trim dead fields (e.g., unused `log_path`) or implement them.
+   - Keep builds warning-free.
 3. **Stabilize error handling**:
    - Ensure all runtime errors preserve terminal state (already fixed for main TUI shutdown).
 4. **Static analyzer improvements**:
@@ -67,11 +81,14 @@ Verified runs (agent-mode) in this session:
 - Input history: `--history` now records inputs; Up/Down navigation and Ctrl-R reverse search supported (multi-line entries preserved).
 - Input editing: cursor-aware line editing with Ctrl-A/E, Ctrl-W, Ctrl-Left/Right, Home/End/Delete, and mid-line insert.
 - Input latency: UI redraws only on change (dirty flag), reducing typing lag.
+- Output scrolling: added scroll offset with auto-scroll to bottom, PageUp/PageDown + mouse wheel support, and Ctrl+Up/Down for line scrolling.
+- Analyzer: strengthened definite-error checks (per-scope labels, goto_map literal target resolution, list bounds/length validation, and stricter type checks) without speculative warnings.
 - list_slice: supports `to_index == 0` and returns empty list when `to_index < from_index`.
 - random_choice: now errors on empty lists (matches Python behavior).
-- chat: parses `n_outputs`/`shown` string values, retries if fewer outputs than requested, strips `line`/`traceback_label` before API call.
+- chat: parses `n_outputs`/`shown` string values, retries if fewer outputs than requested, strips `line`/`traceback_label` before API call, treats empty `voice_path` as disabled.
 - Validation: `voice_path` is checked for literal paths during program analysis and at runtime before starting TTS.
-- Analyzer: added type checks for common fields (strings, arrays, task arrays) and stricter `goto_map`/`replace_map` shape validation.
+- Analyzer: added type checks for common fields (strings, arrays, task arrays), simple-interpolation type resolution using default inserts, and stricter `goto_map`/`replace_map` shape validation.
+- Logging: `--log` now writes structured JSONL with task, input, and menu events.
 - Audio web: optional `--audio-web`/`--audio-port` serves a minimal page with streaming WAV audio; keepalive silence + reconnection; delays shutdown to finish playback.
 
 ## Commands I Use

@@ -1016,7 +1016,7 @@ async fn execute_task(
             let api_url = completion
                 .remove("api_url")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| "http://localhost:8080".to_string());
+                .unwrap_or_else(|| "http://0.0.0.0:8080".to_string());
             let api_key = completion
                 .remove("api_key")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -1039,6 +1039,9 @@ async fn execute_task(
                 }),
             );
             let tts_writer = if let Some(path) = voice_path.clone() {
+                if path.trim().is_empty() {
+                    None
+                } else {
                 let resolved = resolve_path(&ctx, &path);
                 if !resolved.exists() {
                     return Err(anyhow!("voice_path does not exist: {}", resolved.display()));
@@ -1049,6 +1052,7 @@ async fn execute_task(
                 Some(Arc::new(std::sync::Mutex::new(
                     io.start_tts_stream(&resolved.to_string_lossy(), voice_speaker).await?,
                 )))
+                }
             } else {
                 None
             };

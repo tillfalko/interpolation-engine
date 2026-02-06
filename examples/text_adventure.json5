@@ -1,0 +1,340 @@
+{
+    default_state: {
+        order_index : 1,
+        inserts: {
+            // This determines when and how much of the the context to summarize.
+            min_history_turns: 4,
+            max_history_turns: 18,
+            enable_suggestions: 'false', // 'true' or 'false'
+
+            system_prompt: "You are a creative and logical AI.\nPay attention and never make logical mistakes.",
+
+            //voice_path: '../tts_voices/en_GB-semaine-medium.onnx',
+            voice_path: '',
+
+        },
+    },
+    order: [
+
+        {cmd:'user_input', prompt:'Enter a sceanrio, e.g. "This is a text adventure game where you play as a knight on an errant."\n> ', output_name:'scenario'},
+        {cmd:'unescape', item:'{scenario}', output_name:'scenario'},
+
+        {cmd:'label', name:'@restart'},
+        {cmd:'set', item:[], output_name:'history_list'},
+        {cmd:'set', item:'first', output_name:'stage'},
+
+        {cmd:'label', name:'@loop'},
+
+        // enforce small state
+        {cmd:'delete_except', wildcards:['scenario', 'stage', 'history_list', 'enable_*', 'voice_path', 'system_prompt', 'min_history_turns', 'max_history_turns']},
+
+        // SHOW HISTORY
+        {cmd:'list_join', list:'{history_list}', before:'', between:'\n\n', after:'', output_name:'history_text_base'},
+        {cmd:'replace_map', repeat_until_done:true, item:'{history_text_base}', output_name:'history_text_printed', wildcard_maps:[
+
+            // Strip markup tags
+            {'*<first-output>*</first-output>*':'{1}{2}{3}'},
+            {'*<action-output>*</action-output>*':'{1}{2}{3}'},
+            {'*<query-output>*</query-output>*':'{1}{2}{3}'},
+            {'*<query>*</query>*':'{1}? {2}{3}'},
+            {'*<action>*</action>*':'{1}> {2}{3}'},
+            // Style Control
+            {'*  *':'{1} {2}'},
+            {'*\n\n\n*':'{1}\n\n{2}'},
+            {'*\n':'{1}'},
+            {'\n*':'{1}'},
+            {' *':'{1}'},
+            {'* ':'{1}'},
+            {'*':'{1}'},
+        ]},
+        {cmd:'replace_map', repeat_until_done:true, item:'{history_text_base}', output_name:'history_text_llm', wildcard_maps:[
+            // Only Style Control
+            {'*  *':'{1} {2}'},
+            {'*\n\n\n*':'{1}\n\n{2}'},
+            {'*\n':'{1}'},
+            {'\n*':'{1}'},
+            {' *':'{1}'},
+            {'* ':'{1}'},
+            {'*':'{1}'},
+        ]},
+        {cmd:'clear'},
+        {cmd:'print', text:'{history_text_printed}\n\n'},
+
+        {cmd:'delete_except', wildcards:['scenario', 'stage', 'history_list', 'enable_*', 'voice_path', 'system_prompt', 'min_history_turns', 'max_history_turns', 'history_text_llm']},
+
+        {cmd:'set', item:'(unset)', output_name:'output'},
+        {cmd:'parallel_race', tasks:[
+            // GENERATE OUTPUT
+            {cmd:'serial', tasks:[ 
+                // needed in case generation is aborted by /undo or /restart
+                {cmd:'set', item:'(unset)', output_name:'output'},
+
+                // OPTIONS: first, action, query, undo
+                {cmd:'goto_map', text:'{stage}', target_maps:[
+                    {'first':'@generate_first'},
+                    {'action':'@generate_action'},
+                    {'query':'@generate_query'},
+                    {'undo':'@generate_undo'},
+                ]},
+
+                {cmd:'label', name:'@generate_first'},
+                {cmd:'chat',
+                    output_name:'output',
+                    voice_path: '{voice_path}',
+                    voice_speaker: '0',
+                    start_str:'<output>',
+                    stop_str:'</output>',
+                    extra_body:{grammar:'root ::= "<output>" .*'},
+                    messages: [
+                        {role:'system', content:'{system_prompt}'},
+                        {role:'user', content:"This is a text-adventure game in which the player can enter his commands as text.\n\n{scenario}\nWrite the best possible starting output for this game.\n\nDo not add a title or any kind of formatting.\nWrite in a short, dry and informative style. Address the player in second person. Start each output with the most important facts and then add more details. Surround your prompt with <output> and </output>",}
+                    ]
+                },
+                {cmd:'goto', name:'@stage_suggestions'},
+
+                {cmd:'label', name:'@generate_action'},
+                {cmd:'chat',
+                    output_name:'output',
+                    voice_path: '{voice_path}',
+                    voice_speaker: '0',
+                    start_str:'<output>',
+                    stop_str:'</output>',
+                    extra_body:{grammar:'root ::= "<output>" .*'},
+                    messages: [
+                        {role:'system', content:'{system_prompt}'},
+                        {role:'user', content:"This is a text-adventure game in which the player can enter his commands as text.\n\n{scenario}\nHere is what happened so far:\n<history>\n{history_text_llm}\n</history>\n\nWrite the best possible next output in response to the player's last action.\nDo not repeat the player's action, only mention its consequences. Use direct quotes for dialogue.\nWrite in a short, dry and informative style. Address the player in second person. Start each output with the most important facts and then add more details. Do not mention unrelated characters.",}
+                    ]
+                },
+                {cmd:'goto', name:'@stage_suggestions'},
+
+                {cmd:'label', name:'@generate_query'},
+                {cmd:'chat',
+                    output_name:'output',
+                    voice_path: '{voice_path}',
+                    voice_speaker: '0',
+                    start_str:'<output>',
+                    stop_str:'</output>',
+                    extra_body:{grammar:'root ::= "<output>" .*'},
+                    messages: [
+                        {role:'system', content:'{system_prompt}'},
+                        {role:'user', content:"This is a text-adventure game in which the player can enter his commands as text.\n\n{scenario}\nHere is what happened so far:\n<history>\n{history_text_llm}\n</history>\n\nRespond to the player's <query> input with additional information about the world, but do not reveal information that the player's character has no way of knowing. Important: <query> inputs do not represent actions within the game. No matter what the player wrote it cannot affect the game, the player's character will not move, no time will pass, and no character will react. You can address the player directly, but do not break character as the narrator. Do not write any text except your answer. Do not format your output, just write plain text. Avoid poetic language, instead be descriptive and concise. Never use singular 'they'. Surround your entire response with <output> and </output>.",}
+                    ]
+                },
+                {cmd:'goto', name:'@stage_suggestions'},
+
+                {cmd:'label', name:'@generate_undo'},
+                {cmd:'goto', name:'@stage_suggestions'},
+
+
+                {cmd:'label', name:'@stage_suggestions'},
+                // suggestions are the same for any stage
+                {cmd:'replace_map', output_name:'maybe_input', item:'{new_user_input}', wildcard_maps:[
+                    {'NULL'      :'(none)'},
+                    {'*'      :'{1}'},
+                ]},
+                {cmd:'goto_map', text:'{enable_suggestions}|{maybe_input}', target_maps:[
+                    {'true|1':'@generate_suggestions'}, // player chose one of suggestions
+                    {'true|2':'@generate_suggestions'}, // player chose one of suggestions
+                    {'true|3':'@generate_suggestions'}, // player chose one of suggestions
+                    {'false|*'    :'@wait_for_input'},  // suggestions disabled
+                    {'true|(none)'      :'@generate_suggestions'},   // user has not entered input
+                    {'true|*'    :'@wait_for_input'},   // don't generate already has input
+                ]},
+
+                {cmd:'label', name:'@generate_suggestions'},
+                {cmd:'print', text:'\n'},
+                {cmd:'chat',
+                    output_name:'suggestions',
+                    start_str: '<suggestion>',
+                    stop_str: '</suggestion>',
+                    extra_body:{grammar:'root ::= "<suggestion>" .*'},
+                    n_outputs:3,
+                    messages: [
+                        {role:'system', content:'{system_prompt}'},
+                        {role:'user', content:"This is a text-adventure game in which the player can enter his commands as text.\n\n{scenario}\nHere is what happened so far:\n<history>\n\\{history_text\\}\n</history>\n\nWrite three suggestions for possible user actions. Write in the first person from the user's perspective. Example:\n<suggestion>enter the portal</suggestion>\n<suggestion>say \"Can you tell me more about this spell?\"\n<suggestion>user my knife to kill her</suggestion>\n\nMake sure to delimit each suggestion with <suggestion> and </suggestion>"},
+                    ]
+                },
+                {cmd:'list_index', list:'{suggestions}', index:1, output_name:'suggestion_1'},
+                {cmd:'list_index', list:'{suggestions}', index:2, output_name:'suggestion_2'},
+                {cmd:'list_index', list:'{suggestions}', index:3, output_name:'suggestion_3'},
+
+                {cmd:'label', name:'@wait_for_input'},
+                {cmd:'await_insert', name:'new_user_input'},
+
+                {cmd:'replace_map', output_name:'new_user_input', item:'{enable_suggestions}|{new_user_input}', wildcard_maps:[
+                    {'true|1':'{suggestion_1}'},
+                    {'true|2':'{suggestion_2}'},
+                    {'true|3':'{suggestion_3}'},
+                    {'*':'{new_user_input}'},
+                ]},
+            ]},
+
+            // ASK FOR INPUT
+            {cmd:'serial', tasks:[
+                {cmd:'user_input', prompt:'> ', output_name: 'new_user_input'},
+                // only '/undo' and '/restart' are allowed to interrupt generation.
+                {cmd:'goto_map', text:'{new_user_input}', target_maps:[
+                    {'/undo':'@abort'}, 
+                    {'/restart':'@abort'}, 
+                    {'*':'CONTINUE'}
+                ]},
+                // DON'T WAIT FOR SUGGESTIONS IF OUTPUT IS DONE
+                {cmd:'goto_map', text:'{output}|{new_user_input}', target_maps:[
+                    {'NULL':'CONTINUE'}, // output or input not initialized yet
+                    {'(unset)|*':'CONTINUE'}, // output not done yet, wait
+                    {'*|1':'CONTINUE'}, // user chose suggestion, wait for suggestions to complete
+                    {'*|2':'CONTINUE'}, // user chose suggestion, wait for suggestions to complete
+                    {'*|3':'CONTINUE'}, // user chose suggestion, wait for suggestions to complete
+                    {'*|*':'@abort'},  // user entered custom input and output is not (unset). abort suggestions
+                ]},
+
+
+                // This will only end when interrupted by parallel_race
+                {cmd:'user_choice', description:'> {new_user_input}\nWaiting for your turn...', list:[], output_name:'_'},
+
+                {cmd:'label', name:'@abort'},
+            ]},
+
+        ]},
+
+        // handle output depending on stage
+        // now both 'output', and 'new_user_input' are defined.
+        {cmd:'goto_map', text:'{stage}', target_maps:[
+            {'first':'@handle_output_first'},
+            {'action':'@handle_output_action'},
+            {'query':'@handle_output_query'},
+            {'undo':'@handle_output_undo'},
+        ]},
+
+        {cmd:'label', name:'@handle_output_first'},
+        {cmd:'goto_map', text:'{output}', target_maps:[
+            {'(unset)':'@handle_input'},
+            {'*':'CONTINUE'},
+        ]},
+        // store output with informative tags
+        {cmd:'list_append', list:'{history_list}', item:'<action-output>{output}</action-output>', output_name:'history_list'},
+        {cmd:'goto', name:'@handle_input'},
+
+        {cmd:'label', name:'@handle_output_action'},
+        {cmd:'goto_map', text:'{output}', target_maps:[
+            {'(unset)':'@handle_input'},
+            {'*':'CONTINUE'},
+        ]},
+        // store output with informative tags
+        {cmd:'list_append', list:'{history_list}', item:'<action-output>{output}</action-output>', output_name:'history_list'},
+        {cmd:'goto', name:'@handle_input'},
+
+        {cmd:'label', name:'@handle_output_query'},
+        {cmd:'goto_map', text:'{output}', target_maps:[
+            {'(unset)':'@handle_input'},
+            {'*':'CONTINUE'},
+        ]},
+        // store output with informative tags
+        {cmd:'list_append', list:'{history_list}', item:'<query-output>{output}</query-output>', output_name:'history_list'},
+        {cmd:'goto', name:'@handle_input'},
+
+        {cmd:'label', name:'@handle_output_undo'},
+        // don't add on an undo
+        {cmd:'goto', name:'@handle_input'},
+
+
+
+        // handle input depending on input
+        {cmd:'label', name:'@handle_input'},
+        {cmd:'goto_map', text:'{new_user_input}', target_maps:[
+            {'/restart':'@restart'},
+            {'/undo':'@handle_input_undo'},
+            {'/summarize':'@summarize'}, // discards output
+            {'(*)':'@handle_input_query'},
+            {'*':'@handle_input_action'},
+        ]},
+
+        {cmd:'label', name:'@handle_input_action'},
+        {cmd:'list_append', list:'{history_list}', item:'<action>{new_user_input}</action>', output_name:'history_list'},
+        {cmd:'set', output_name:'stage', item:'action'},
+        {cmd:'goto', name:'@check_if_summarize'},
+
+        {cmd:'label', name:'@handle_input_query'},
+        {cmd:'list_append', list:'{history_list}', item:'<query>{new_user_input}</query>', output_name:'history_list'},
+        {cmd:'set', output_name:'stage', item:'query'},
+        {cmd:'goto', name:'@check_if_summarize'},
+
+        {cmd:'label', name:'@handle_input_undo'},
+         // actually undo
+                {cmd:'math', output_name:'isodd', input:'length(history_list) % 2'},
+                {cmd:'math', output_name:'length_history', input:'length(history_list)'},
+                {cmd:'goto_map', text:'{isodd}|{length_history}', target_maps:[
+                    {'*|0':'@restart'}, 
+                    {'0|*':'@undo_even_history'},
+                    {'1|*':'@undo_odd_history'},
+                ]},
+
+                {cmd:'label', name:'@undo_odd_history'},
+                {cmd:'label', name:'@undo_even_history'},
+                // remove the last user input and the output that was just added in 'handle output depending on stage'
+
+                {cmd:'list_slice', output_name:'history_list', list:'{history_list}', from_index:1, to_index:-3},
+                {cmd:'goto', name:'@end_actually_undo'},
+
+                //{cmd:'clear'},
+                //{cmd:'print', text:' {history_list}'},
+                //{cmd:'user_choice', description:'Error: the history list has a positive but odd number of items, something went wrong.\n(first/summary, input, output, input <- should always be even)', list:[], output_name:''}, 
+                //{cmd:'goto', name:'@end_actually_undo'},
+        // end actually undo
+        {cmd:'label', name:'@end_actually_undo'},
+
+        {cmd:'set', output_name:'stage', item:'undo'},
+        {cmd:'goto', name:'@check_if_summarize'},
+
+
+        {cmd:'label', name:'@check_if_summarize'},
+        {cmd:'math', output_name:'length_history', input:'length(history_list)'},
+        {cmd:'math', input:'length(history_list) - 2 * {min_history_turns}', output_name:'n_summarize'},
+        {cmd:'math', input:'sign(length(history_list) - {max_history_turns} * 2)', output_name:'should_summarize'},
+
+        {cmd:'goto_map', text:'{should_summarize}', target_maps:[
+            {'1': '@summarize'},
+            {'*': '@loop'},
+        ]},
+
+        {cmd:'label', name:'@summarize'},
+        {cmd:'math', input:'length(history_list) - 2 * {min_history_turns}', output_name:'n_summarize'},
+        {cmd:'math', input:'sign({n_summarize})', output_name:'summarize_ok'},
+        {cmd:'goto_map', text:'{summarize_ok}', target_maps:[
+            {'1':'@summarize_run'},
+            {'*':'@loop'},
+        ]},
+        {cmd:'label', name:'@summarize_run'},
+        {cmd:'list_slice', list:'{history_list}', from_index:1, to_index:'{n_summarize}', output_name:'to_summarize_list'}, 
+        {cmd:'list_join', list:'{to_summarize_list}', before:'', between:'\n\n', after:'', output_name:'to_summarize_text'},
+        {cmd:'chat',
+            temperature: 0.5,
+            output_name:'summary',
+            start_str:'<summary>',
+            stop_str:'</summary>',
+            extra_body:{grammar:'root ::= "<summary>" .*'},
+            messages: [
+                {role:'system', content:'{system_prompt}'},
+                {role:'user', content:"This is a text-adventure game in which the player can enter his commands as text.\n\n{scenario}\nHere is what happened so far:\n<history>\n\n{to_summarize_text}\n</history>\n\nCreate a summary of all that has happened so far. Write in the second person like you are talking to the player. Spare no detail but be super concise at the expense of proper grammar. Surround your super compact summary with <summary> and </summary> tags."},
+            ]
+        },
+        {cmd:'set', item:['<first-output>{summary}</first-output>'], output_name:'summary_list'},
+        {cmd:'list_slice', list:'{history_list}', from_index:'{n_summarize} + 1', to_index:99999, output_name:'history_list'}, // Discard what was summarized.
+        {cmd:'list_concat', lists:['{summary_list}', '{history_list}'], output_name:'history_list'},
+        {cmd:'goto', name:'@loop'},
+
+
+
+
+
+
+    ],
+    named_tasks: {
+    },
+    save_states : {
+    },
+    completion_args: {
+        model: "bartowski_Mistral-Nemo-Instruct-2407-GGUF_Mistral-Nemo-Instruct-2407-Q8_0",
+    },
+
+}
