@@ -1,14 +1,12 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind, DisableMouseCapture, EnableMouseCapture},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    text::Text,
     widgets::{Block, Borders, Paragraph, Wrap},
     Terminal,
 };
@@ -154,6 +152,9 @@ struct UiState {
     output_scroll: usize,
     auto_scroll: bool,
     last_layout: Option<LayoutInfo>,
+    output_line_count: usize,
+    output_line_width: usize,
+    output_dirty: bool,
     dirty: bool,
 }
 
@@ -181,6 +182,9 @@ fn spawn_ui_thread(
             output_scroll: 0,
             auto_scroll: true,
             last_layout: None,
+            output_line_count: 0,
+            output_line_width: 0,
+            output_dirty: true,
             dirty: true,
         };
         if let Some(path) = &state.history_path {
@@ -200,8 +204,18 @@ fn spawn_ui_thread(
                 }
             }
 
-            if event::poll(Duration::from_millis(10)).unwrap_or(false) {
+            let mut saw_event = false;
+            loop {
+                let timeout = if saw_event {
+                    Duration::from_millis(0)
+                } else {
+                    Duration::from_millis(10)
+                };
+                if !event::poll(timeout).unwrap_or(false) {
+                    break;
+                }
                 if let Ok(event) = event::read() {
+                    saw_event = true;
                     let (quit, changed) = match event {
                         Event::Key(key) => handle_key(key, &mut state, &event_tx),
                         Event::Mouse(mouse) => (false, handle_mouse(mouse.kind, &mut state)),
@@ -232,6 +246,7 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) -> bool {
     match cmd {
         UiCommand::Write(text) => {
             state.output.push_str(&text);
+            state.output_dirty = true;
             if state.auto_scroll {
                 if let Some(layout) = state.last_layout {
                     state.output_scroll = layout.max_scroll;
@@ -243,10 +258,12 @@ fn handle_command(cmd: UiCommand, state: &mut UiState) -> bool {
             state.output.clear();
             state.output_scroll = 0;
             state.auto_scroll = true;
+            state.output_dirty = true;
             true
         }
         UiCommand::SetOutput(text) => {
             state.output = text;
+            state.output_dirty = true;
             if state.auto_scroll {
                 if let Some(layout) = state.last_layout {
                     state.output_scroll = layout.max_scroll;
@@ -336,6 +353,9 @@ fn handle_key(key: KeyEvent, state: &mut UiState, event_tx: &UnboundedSender<UiE
                 let text = buffer.clone();
                 if let Some(path) = &state.history_path {
                     let _ = append_history(path, &text);
+                }
+                if !text.is_empty() {
+                    state.history.push(text.clone());
                 }
                 if let Some(tx) = respond_to.take() {
                     let _ = tx.send(text);
@@ -738,6 +758,7 @@ fn scroll_output_delta(state: &mut UiState, delta: i32) -> bool {
     true
 }
 
+
 fn append_history(path: &PathBuf, text: &str) -> io::Result<()> {
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(text.as_bytes())?;
@@ -820,8 +841,8 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &mut UiState) 
 
         let width = size.width as usize;
         let height = size.height as usize;
-        let prompt_height = wrapped_line_count(&prompt_text, width).min(height);
-        let info_pref = wrapped_line_count(&info_text, width).min(height);
+        let prompt_height = line_count_no_wrap(&prompt_text).min(height);
+        let info_pref = line_count_no_wrap(&info_text).min(height);
 
         let (mut output_height, info_height) = match &state.mode {
             Mode::Choice { .. } | Mode::Input { .. } | Mode::Search { .. } => {
@@ -850,7 +871,12 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &mut UiState) 
             ])
             .split(size);
 
-        let total_output_lines = wrapped_line_count(&state.output, width);
+        if state.output_dirty || state.output_line_width != width {
+            state.output_line_count = paragraph_line_count(&state.output, width);
+            state.output_line_width = width;
+            state.output_dirty = false;
+        }
+        let total_output_lines = state.output_line_count;
         let max_scroll = total_output_lines.saturating_sub(output_height);
         state.last_layout = Some(LayoutInfo {
             output_height,
@@ -863,7 +889,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &mut UiState) 
             state.output_scroll.min(max_scroll)
         };
 
-        let output = Paragraph::new(Text::from(state.output.clone()))
+        let output = Paragraph::new(state.output.as_str())
             .wrap(Wrap { trim: false })
             .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0))
             .block(Block::default().borders(Borders::NONE));
@@ -871,12 +897,10 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &mut UiState) 
 
         let info = Paragraph::new(info_text.clone())
             .style(Style::default().fg(Color::Yellow))
-            .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(info, chunks[1]);
         let prompt = Paragraph::new(prompt_text.clone())
             .style(Style::default().fg(Color::Yellow))
-            .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::NONE));
         f.render_widget(prompt, chunks[2]);
 
@@ -925,18 +949,25 @@ fn build_choice_keys(n: usize) -> Vec<String> {
     keys
 }
 
-fn wrapped_line_count(text: &str, width: usize) -> usize {
-    if text.is_empty() || width == 0 {
+fn paragraph_line_count(text: &str, width: usize) -> usize {
+    if width == 0 {
         return 0;
     }
-    let mut count = 0;
-    for line in text.split('\n') {
-        let len = line.chars().count();
-        let lines = if len == 0 { 1 } else { (len - 1) / width + 1 };
-        count += lines;
+    if text.is_empty() {
+        return 0;
     }
-    count
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .line_count(width as u16)
 }
+
+fn line_count_no_wrap(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    text.split('\n').count()
+}
+
 
 fn cursor_offset(text: &str, width: usize) -> (usize, usize) {
     let mut row = 0;
@@ -1049,16 +1080,16 @@ fn char_at(text: &str, idx: usize) -> char {
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend)
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+    Ok(terminal)
 }
 
 fn cleanup_terminal(term: Option<Terminal<CrosstermBackend<Stdout>>>) {
     if let Some(mut terminal) = term {
         let _ = disable_raw_mode();
-        let _ = execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen);
         let _ = terminal.show_cursor();
     }
 }

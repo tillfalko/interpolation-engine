@@ -60,6 +60,8 @@ Steps:
 Expected if the server is reachable but the model name is invalid:
 `Error: Chat request failed: 400 Bad Request {"error":{"code":400,"message":"model not found","type":"invalid_request_error"}}`
 
+Note: accessing `http://0.0.0.0:8080` requires elevated permissions here; if a test needs localhost, run with escalation.
+
 ## Known Issues / Gaps
 - Chat examples still not validated in this environment: local socket access for chat is blocked in agent-mode runs (see latest run attempt).
 - Output scrolling in the TUI was missing; fixed to support PageUp/PageDown, Ctrl+Up/Down, Home/End, and mouse wheel scrolling (auto-scroll keeps the view pinned to the bottom unless the user scrolls up).
